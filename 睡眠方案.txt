@@ -1,0 +1,214 @@
+🧠 一、系统总体架构（通用版）
+雷达输入（两种类型）
+   ↓
+统一存在检测层（Presence Layer）
+   ↓
+生理信号层（HR / RR / HRV / Movement）
+   ↓
+睡眠状态机（核心）
+   ↓
+睡眠分期
+   ↓
+事件检测（入睡 / 醒来 / 离床）
+   ↓
+统计 + 评分
+🧩 二、雷达适配层设计（重点）
+
+你要做的是：统一接口，底层适配
+
+✅ 统一输出结构
+typedef struct {
+    bool isPresent;        // 是否有人
+    float distance;        // 距离（无距离雷达填-1）
+    float confidence;      // 存在置信度 0~1
+    float motionEnergy;    // 微动能量（关键！）
+} PresenceData;
+🟢 情况1：支持距离雷达（如FMCW）
+isPresent = (distance > 20cm && distance < 100cm)
+         && (energy > threshold);
+
+confidence = energy归一化;
+
+👉 优势：
+
+可以判断是否在床上
+可以做“离床”精准检测
+🔵 情况2：不支持距离（如存在检测雷达）
+
+👉 用“微动 + 呼吸”判断
+
+isPresent = (motionEnergy > lowThreshold)
+         || (检测到呼吸信号);
+
+confidence = motionEnergy归一化;
+⚠️ 关键优化（必须做）
+
+👉 防误判（静止误判无人）：
+
+if (HR 或 RR 有效)
+    isPresent = true;
+🚶 三、有人 / 离床 / 无人逻辑（统一）
+✅ 状态定义
+NO_PERSON
+IN_BED
+OUT_OF_BED
+🧾 通用逻辑
+if (!presence.isPresent) {
+    noPersonTimer += dt;
+
+    if (noPersonTimer > 10min) {
+        state = NO_PERSON;
+        endSleepSession();
+    } else {
+        state = OUT_OF_BED;
+        awakeTime += dt;
+    }
+
+} else {
+    noPersonTimer = 0;
+
+    // 有距离版本
+    if (presence.distance > 80cm)
+        state = OUT_OF_BED;
+    else
+        state = IN_BED;
+}
+😴 四、入睡判断（统一方案）
+✅ 输入
+HR（心率）
+RR（呼吸）
+HRV
+Movement（0~100）
+📐 Sleepiness Score
+S = 0.35*(1 - HR_norm)
+  + 0.25*(HRV_norm)
+  + 0.20*(1 - RR_var)
+  + 0.20*(1 - Movement_norm)
+🧾 判定
+if (S > 0.6 持续 5~10分钟)
+    → 入睡
+⚠️ 雷达适配补充
+
+👉 无距离雷达必须加：
+
+if (!presence.isPresent)
+    不允许入睡
+🌙 五、睡眠分期（核心）
+🧠 特征统一归一化
+HR_norm  = (HR - baselineHR)/20
+RR_norm  = (RR - baselineRR)/4
+HRV_norm = HRV / 50
+Move_norm= Movement / 100
+🟢 深睡（Deep Sleep）
+DeepScore =
+  0.4*(1 - HR_norm)
++ 0.3*(HRV_norm)
++ 0.2*(1 - Move_norm)
++ 0.1*(RR稳定)
+
+条件加强版：
+
+Movement < 10
+HRV > baseline
+🔵 浅睡（Light Sleep）
+LightScore =
+  0.3*(HR适中)
++ 0.3*(HRV中)
++ 0.2*(Move 10~40)
++ 0.2*(RR稳定)
+🔴 清醒（Awake）
+AwakeScore =
+  0.5*(Move_norm)
++ 0.3*(HR_norm)
++ 0.2*(RR波动)
+🧾 分类
+max(Deep, Light, Awake)
+⏰ 六、醒来判断
+✅ 强规则（推荐）
+if (Movement > 50 持续 2分钟)
+    → 醒来
+✅ 融合规则
+if (HR ↑ && RR ↑ && Movement ↑)
+    → 醒来
+🚪 七、离床判断（通用版）
+🟢 有距离雷达
+if (distance > 80cm)
+    OUT_OF_BED
+🔵 无距离雷达
+if (!presence.isPresent 持续 > 30秒)
+    OUT_OF_BED
+🧾 最终结束
+if (无人 > 10分钟)
+    → 结束睡眠
+📊 八、睡眠统计
+
+记录：
+
+totalSleepTime
+deepSleepTime
+lightSleepTime
+awakeTime
+outOfBedTime
+sleepLatency（入睡时间）
+wakeCount
+⭐ 九、睡眠评分系统
+🎯 总分100
+1️⃣ 时长（30）
+7~9小时 → 满分
+2️⃣ 深睡比例（25）
+Deep / Total > 20%
+3️⃣ 连续性（20）
+醒来少 → 高分
+4️⃣ 生理质量（15）
+HRV高 + HR稳定
+5️⃣ 入睡速度（10）
+<20分钟
+📐 总公式
+Score =
+0.3*duration +
+0.25*deep +
+0.2*continuity +
+0.15*physiology +
+0.1*latency
+🔁 十、完整状态机（统一）
+NO_PERSON
+   ↓
+IN_BED
+   ↓
+AWAKE
+   ↓ (满足入睡)
+LIGHT_SLEEP
+   ↓
+DEEP_SLEEP
+   ↑↓
+LIGHT_SLEEP
+   ↓
+AWAKE
+   ↓
+OUT_OF_BED
+   ↓（10min）
+END
+⚙️ 十一、ESP32建议架构（实战）
+🧵 任务划分（FreeRTOS）
+Task1：雷达采集（Presence）
+Task2：HR/RR/HRV计算
+Task3：睡眠状态机（核心）
+Task4：UI / MQTT上传
+⏱ 更新周期
+Presence：10~20Hz
+HR/RR：1Hz
+睡眠分析：1Hz
+🚀 十二、关键工程优化（你必须做）
+1️⃣ 防误判“无人”
+if (HR有效 || RR有效)
+    强制 presence = true
+2️⃣ 防抖动（超级关键）
+状态必须持续 N 秒才切换
+3️⃣ 数据无效保护
+if (!HRV valid)
+    不参与深睡判断
+✅ 总结（最核心一句话）
+
+👉 这套方案本质是：
+
+“雷达判断人 → 生理判断睡 → 时间保证稳定 → 状态机做最终决策”
