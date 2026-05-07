@@ -1,4 +1,5 @@
 #include "radar_manager.h"
+#include "tasks_manager.h"
 #include "wifi_manager.h"
 #include <Preferences.h>
 #include <esp_task_wdt.h>
@@ -708,7 +709,7 @@ bool isDataChanged() {
  * @param parameter 任务参数（未使用）
  */
 void bleSendTask(void *parameter) {
-    Serial.println("🔁 R60ABD1蓝牙数据发送任务启动");
+    Serial.println("🔁 R60ABD1 BLE data send task started");
     
     while (1) {
         esp_task_wdt_reset();
@@ -723,52 +724,53 @@ void bleSendTask(void *parameter) {
                 
                 // 检查数据是否发生变化
                 if (isDataChanged()) {
-                    // 构建雷达数据字符串
-                    String radarDataCore;
+                    // 构建JSON数据
+                    JsonDocument doc;
+                    doc["method"] = "ble.event.data.post";
+                    doc["deviceId"] = getDeviceMacAddress();
+                    doc["reportType"] = "radar";
+                    doc["success"] = true;
+                    
+                    JsonObject params = doc["params"].to<JsonObject>();
                     
                     if (sensorData.presence > 0) {
-                        radarDataCore = String(sensorData.heart_rate, 1) + String("|") +
-                                       String(sensorData.breath_rate, 1) + String("|") +
-                                       String((int)sensorData.heart_waveform[0]) + String("|") +
-                                       String((int)sensorData.breath_waveform[0]) + String("|") +
-                                       String(sensorData.presence) + String("|") +
-                                       String(sensorData.motion) + String("|") +
-                                       String(sensorData.sleep_state);
+                        params["heartRate"] = sensorData.heart_rate;
+                        params["breathingRate"] = sensorData.breath_rate;
+                        params["heartbeatWaveform"] = (int)sensorData.heart_waveform[0];
+                        params["breathingWaveform"] = (int)sensorData.breath_waveform[0];
+                        params["personDetected"] = sensorData.presence;
+                        params["humanActivity"] = sensorData.motion;
+                        params["sleepState"] = sensorData.sleep_state;
+                        params["humanDistance"] = sensorData.distance;
+                        params["humanPositionX"] = sensorData.pos_x;
+                        params["humanPositionY"] = sensorData.pos_y;
+                        params["humanPositionZ"] = sensorData.pos_z;
+                        params["timestamp"] = currentTime;
                     } else {
-                        radarDataCore = String("0.0") + String("|") +
-                                       String("0.0") + String("|") +
-                                       String("0") + String("|") +
-                                       String("0") + String("|") +
-                                       String("0") + String("|") +
-                                       String("0") + String("|") +
-                                       String("0");
+                        params["heartRate"] = 0.0;
+                        params["breathingRate"] = 0.0;
+                        params["heartbeatWaveform"] = 0;
+                        params["breathingWaveform"] = 0;
+                        params["personDetected"] = 0;
+                        params["humanActivity"] = 0;
+                        params["sleepState"] = 0;
+                        params["humanDistance"] = 0;
+                        params["timestamp"] = currentTime;
                     }
                     
-                    // 计算CRC校验
-                    unsigned int crc = 0xFFFF;
-                    for (int i = 0; i < radarDataCore.length(); i++) {
-                        crc ^= (unsigned int)radarDataCore.charAt(i);
-                        for (int j = 0; j < 8; j++) {
-                            if (crc & 0x0001) {
-                                crc >>= 1;
-                                crc ^= 0xA001;
-                            } else {
-                                crc >>= 1;
-                            }
-                        }
-                    }
-                    
-                    String radarDataMsg = radarDataCore + String("|") + String(crc, HEX);
+                    // 序列化为JSON字符串
+                    String jsonStr;
+                    serializeJson(doc, jsonStr);
 
                     const int MAX_BLE_PACKET_SIZE = 20;
-                    if (radarDataMsg.length() <= MAX_BLE_PACKET_SIZE) {
+                    if (jsonStr.length() <= MAX_BLE_PACKET_SIZE) {
                         if (xSemaphoreTake(bleSendMutex, portMAX_DELAY) == pdTRUE) {
-                            pCharacteristic->setValue(radarDataMsg.c_str());
+                            pCharacteristic->setValue(jsonStr.c_str());
                             pCharacteristic->notify();
                             xSemaphoreGive(bleSendMutex);
                         }
                     } else {
-                        sendDataInChunks(radarDataMsg);
+                        sendDataInChunks(jsonStr);
                     }
 
                     lastSentData.heart_rate = sensorData.heart_rate;

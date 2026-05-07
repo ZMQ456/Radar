@@ -8,14 +8,15 @@
 #include "data_processor.h"
 #include "emotion_analyzer_simple.h"
 #include "tasks_manager.h"
+#include "OTA_manager.h"
 
 Preferences preferences; // Flash存储对象
 WiFiManager wifiManager; // WiFi管理器对象
 
 uint16_t currentDeviceId = 0000; // 当前设备ID
 
-void checkBootButton();
-void loadDeviceId();
+void checkBootButton();//检查Boot按钮状态
+void loadDeviceId();//加载设备ID
 
 /**
  * @brief 系统初始化函数
@@ -32,6 +33,7 @@ void setup() {
     preferences.begin("radar_data", false);  // 初始化Flash存储
     loadDeviceId();                         // 加载设备ID
     initRadarManager();                     // 初始化雷达管理器
+    initOtaManager();                       // 初始化OTA管理器
     initAllTasks();                         // 创建所有FreeRTOS任务
     if (WiFi.status() == WL_CONNECTED)    // 启动时发送睡眠数据
         sendSleepDataToInfluxDB();

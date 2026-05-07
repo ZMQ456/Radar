@@ -49,4 +49,14 @@ void sendDailyDataToMQTT();
 void sendSleepDataToMQTT();
 void sendHeartbeatToMQTT();//发送心跳包
 
+// OTA相关函数
+String getOtaUpgradeTopic();
+String getOtaProgressTopic();
+String getOtaVersionReportTopic();
+String getOtaResultInformTopic();
+bool publishOtaVersionReport();
+bool publishOtaResultInform(const char* version, const char* module);
+bool publishOtaProgress(const char* requestId, int step, const char* desc, const char* module);
+bool handleOtaUpgradeMessage(const char* topic, const String& payload);
+
 #endif

@@ -1,9 +1,9 @@
 #include "wifi_manager.h"
 
 // 外部变量和函数声明
-extern bool deviceConnected;
-void sendJSONDataToBLE(const String& jsonData);
-void setNetworkStatus(NetworkStatus status);
+extern bool deviceConnected;// 设备是否已连接到WiFi网络标志
+void sendJSONDataToBLE(const String& jsonData);// 发送JSON数据到BLE设备
+void setNetworkStatus(NetworkStatus status);// 设置网络状态
 
 /**
  * @brief WiFi管理器构造函数
@@ -25,7 +25,7 @@ WiFiManager::WiFiManager() {
     }
     
     // 创建状态互斥锁
-    stateMutex = xSemaphoreCreateMutex();
+    stateMutex = xSemaphoreCreateMutex();//创建状态互斥锁
     if (stateMutex == NULL) {
         Serial.println("❌ 创建状态互斥锁失败");
     }
@@ -73,7 +73,7 @@ void WiFiManager::begin() {
         xTaskCreate(
             reconnectTask,
             "WiFi Reconnect Task",
-            4096,
+            8192,
             this,
             1,  // 低优先级
             &reconnectTaskHandle
@@ -263,6 +263,16 @@ bool WiFiManager::connectToNetwork(const char* ssid, const char* password) {
  * @return 是否成功连接到匹配的网络
  */
 bool WiFiManager::scanAndMatchNetworks() {
+    // ========== 变量声明区 ==========
+    struct CandidateNetwork {
+        const char* ssid;
+        const char* password;
+        int rssi;
+    };
+    
+    CandidateNetwork availableNetworks[MAX_WIFI_NETWORKS];
+    int availableCount = 0;
+    
     // 尝试获取WiFi互斥锁，最多等待100ms
     if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         Serial.println("⏸️ [scanAndMatchNetworks] WiFi正在被其他操作占用，跳过扫描");
@@ -380,16 +390,6 @@ bool WiFiManager::scanAndMatchNetworks() {
         Serial.printf("📱 [BLE] 发送重连扫描结果，共 %d 个网络\n", n);
         sendJSONDataToBLE(wifiList);
     }
-    
-    // 收集所有匹配的、信号强度符合要求的网络
-    struct CandidateNetwork {
-        const char* ssid;
-        const char* password;
-        int rssi;
-    };
-    
-    CandidateNetwork availableNetworks[MAX_WIFI_NETWORKS];
-    int availableCount = 0;
     
     // 遍历已保存的网络，寻找匹配的网络
     for (int i = 0; i < savedNetworkCount; i++) {

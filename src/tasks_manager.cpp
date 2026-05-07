@@ -6,19 +6,19 @@
 #include <BLEDevice.h>
 #include <esp_task_wdt.h>
 
-NetworkStatus currentNetworkStatus = NET_INITIAL;
-unsigned long lastBlinkTime = 0;
-bool ledState = false;
-int breatheValue = 0;
-bool breatheIncreasing = true;
-uint8_t WiFi_Connect_First_bit = 1;
-uint64_t device_sn = 0;
+NetworkStatus currentNetworkStatus = NET_INITIAL;//当前网络状态，初始为初始网络状态
+unsigned long lastBlinkTime = 0;//上次闪烁时间
+bool ledState = false;//LED状态
+int breatheValue = 0;//呼吸值
+bool breatheIncreasing = true;//呼吸值是否递增
+uint8_t WiFi_Connect_First_bit = 1;//WiFi连接状态位
+uint64_t device_sn = 0;//设备SN，初始为0，后续从Flash中加载
 
-PhysioDataProcessor* physioProcessor;
-SimpleEmotionAnalyzer* emotionAnalyzer;
+PhysioDataProcessor* physioProcessor;//生理数据处理器
+SimpleEmotionAnalyzer* emotionAnalyzer;//情感分析器
 
-bool clearConfigRequested = false;
-bool forceLedOff = false;
+bool clearConfigRequested = false;//是否请求清除配置
+bool forceLedOff = false;//是否强制关闭LED
 
 /**
  * @brief 加载设备SN
@@ -34,7 +34,7 @@ void loadDeviceSN() {
  * 将设备SN保存到Flash中（支持64位雪花算法ID）
  */
 void saveDeviceId() {
-    preferences.putULong64("deviceSn", device_sn);
+    preferences.putULong64("deviceSn", device_sn);//将设备SN保存到Flash中
     Serial.printf("设备SN已保存到Flash: %llu\n", device_sn);
 }
 
