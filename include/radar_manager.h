@@ -12,6 +12,7 @@
 #include <freertos/task.h>
 #include <freertos/queue.h>
 #include <Preferences.h>
+#include "ble_tlv_protocol.h"
 
 class WiFiManager;
 
@@ -165,6 +166,10 @@ extern HardwareSerial mySerial1; // 硬件串口1
 extern QueueHandle_t phaseDataQueue; // 相位数据队列
 extern QueueHandle_t vitalDataQueue; // 生命体征数据队列
 extern QueueHandle_t uartQueue; // UART数据队列
+typedef struct {
+    char json[256];
+} BleCommandMessage;
+
 extern TaskHandle_t bleSendTaskHandle; // BLE发送任务句柄
 extern TaskHandle_t vitalSendTaskHandle; // 生命体征发送任务句柄
 extern TaskHandle_t uartProcessTaskHandle; // UART处理任务句柄
@@ -172,9 +177,9 @@ extern BLEServer* pServer; // BLE服务器指针
 extern BLECharacteristic* pCharacteristic; // BLE特征值指针
 extern bool deviceConnected; // 设备连接状态
 extern bool oldDeviceConnected; // 旧设备连接状态
-extern String receivedData; // 接收到的数据
-extern String completeData; // 完整数据
-extern unsigned long lastReceiveTime; // 上次接收数据时间
+extern BleProto::FrameParser bleFrameParser; // BLE帧解析器
+extern uint8_t bleSequenceCounter; // BLE序列号计数器
+extern QueueHandle_t bleCommandQueue; // BLE命令队列
 extern bool continuousSendEnabled; // 持续发送使能标志
 extern unsigned long continuousSendInterval; // 持续发送间隔
 extern unsigned long lastSleepDataTime; // 上次发送睡眠数据时间

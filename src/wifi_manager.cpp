@@ -221,7 +221,7 @@ bool WiFiManager::connectToNetwork(const char* ssid, const char* password) {
             doc["success"] = true;
             doc["ssid"] = ssid;
             doc["password"] = password;
-            doc["ip"] = WiFi.localIP().toString();
+            doc["ipAddress"] = WiFi.localIP().toString();
             doc["rssi"] = WiFi.RSSI();
             
             String jsonStr;
@@ -1071,7 +1071,7 @@ void WiFiManager::getSavedNetworks() {
  * @param parameter WiFiManager实例指针
  */
 void WiFiManager::reconnectTask(void* parameter) {
-    WiFiManager* manager = (WiFiManager*)parameter;
+    WiFiManager* manager = (WiFiManager*)parameter;// 获取WiFiManager实例指针
     
     Serial.println("📡 [重连任务] 启动");
     Serial.printf("📡 [重连任务] 初始状态: %d, manualConfigActive: %d\n", 
@@ -1137,7 +1137,7 @@ void WiFiManager::reconnectTask(void* parameter) {
 
 /**
  * @brief 启动扫描 - 抢占式
- * 通过信号量通知重连任务暂停，然后执行扫描
+ * 通过设置 scanInProgress 标志通知重连任务暂停，然后执行扫描
  * @param timeoutMs 扫描超时时间（毫秒）
  * @return 是否成功启动扫描
  */

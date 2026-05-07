@@ -53,14 +53,18 @@ BLECharacteristic* pCharacteristic = NULL; // BLE特征值指针
 
 bool deviceConnected = false; // 设备连接状态
 bool oldDeviceConnected = false; // 旧设备连接状态
-String receivedData = ""; // 接收到的数据
-String completeData = ""; // 完整数据
-unsigned long lastReceiveTime = 0; // 上次接收数据时间
+QueueHandle_t bleCommandQueue = nullptr; // BLE命令队列
 
 bool continuousSendEnabled = false; // 持续发送使能标志
 unsigned long continuousSendInterval = 500; // 持续发送间隔（毫秒）
 BLEFlowController bleFlow(500); // BLE流控制器对象
 SemaphoreHandle_t bleSendMutex; // BLE发送互斥锁
+
+BleProto::FrameParser bleFrameParser; // BLE帧解析器（TLV协议）
+uint8_t bleSequenceCounter = 0;       // BLE出站帧序列号计数器
+
+// BLE命令处理常量
+static const size_t MAX_LEGACY_JSON_LEN = sizeof(BleCommandMessage::json) - 1; // legacy JSON兼容队列限制，不是TLV协议限制
 
 unsigned long lastSensorUpdate = 0; // 上次传感器更新时间
 LastSentData lastSentData = {0}; // 上次发送的数据，初始化为0
@@ -162,42 +166,49 @@ void MyServerCallbacks::onDisconnect(BLEServer* pServer) {
  */
 void MyCallbacks::onWrite(BLECharacteristic *pCharacteristic) {
     std::string value = pCharacteristic->getValue();
+    if (value.empty()) {
+        return;
+    }
 
-    if (value.length() > 0) {
-        String fragment = "";
-        for (int i = 0; i < value.length(); i++)
-            fragment += value[i];
+    // 队列未初始化，直接丢弃
+    if (bleCommandQueue == nullptr) {
+        Serial.println("[BLE] 警告：命令队列为空，丢弃命令");
+        return;
+    }
 
-        completeData += fragment;
-        lastReceiveTime = millis();
+    BleProto::Frame frame;
+    bool parsed = bleFrameParser.input(
+        reinterpret_cast<const uint8_t*>(value.data()),
+        value.size(),
+        frame
+    );
 
-        int openBrace = completeData.indexOf('{');
-
-        if (openBrace >= 0) {
-            int depth = 0;
-            int closeBrace = -1;
-
-            for (int i = openBrace; i < completeData.length(); i++) {
-                char c = completeData.charAt(i);
-                if (c == '{') {
-                    depth++;
-                } else if (c == '}') {
-                    depth--;
-                    if (depth == 0) {
-                        closeBrace = i;
-                        break;
-                    }
-                }
-            }
-
-            if (closeBrace > openBrace) {
-                String jsonData = completeData.substring(openBrace, closeBrace + 1);
-                completeData = completeData.substring(closeBrace + 1);
-                
-                Serial.printf("📥 [BLE] 完整JSON数据: %s\n", jsonData.c_str());
-                receivedData = jsonData;
-            }
+    while (parsed) {
+        String legacyJson;
+        if (BleProto::decodeFrameToLegacyJson(frame, legacyJson)) {
+            Serial.printf("[BLE] 收到TLV命令，转旧JSON: %s\n", legacyJson.c_str());
+        } else {
+            Serial.printf("[BLE] 未识别CMD: 0x%02X\n", frame.cmd);
+            legacyJson = "{\"command\":\"unknown\"}";
         }
+
+        // 检查消息长度，避免截断
+        if (legacyJson.length() > MAX_LEGACY_JSON_LEN) {
+            Serial.printf("[BLE] 命令过长(%d > %d)，静默丢弃（避免回调中同步响应）\n", 
+                         legacyJson.length(), MAX_LEGACY_JSON_LEN);
+            parsed = bleFrameParser.input(nullptr, 0, frame);
+            continue;
+        }
+
+        BleCommandMessage msg = {};
+        legacyJson.toCharArray(msg.json, sizeof(msg.json));
+        
+        // 检查队列是否已满
+        if (xQueueSend(bleCommandQueue, &msg, 0) != pdTRUE) {
+            Serial.println("[BLE] 命令队列已满，静默丢弃（避免回调中同步响应）");
+        }
+
+        parsed = bleFrameParser.input(nullptr, 0, frame);
     }
 }
 
@@ -223,6 +234,13 @@ void initRadarManager() {
         Serial.println("❌ BLE发送互斥锁创建失败");
     } else {
         Serial.println("✅ BLE发送互斥锁创建成功");
+    }
+
+    bleCommandQueue = xQueueCreate(10, sizeof(BleCommandMessage));
+    if (bleCommandQueue == NULL) {
+        Serial.println("❌ BLE命令队列创建失败");
+    } else {
+        Serial.println("✅ BLE命令队列创建成功");
     }
 
     xTaskCreatePinnedToCore(
@@ -762,16 +780,8 @@ void bleSendTask(void *parameter) {
                     String jsonStr;
                     serializeJson(doc, jsonStr);
 
-                    const int MAX_BLE_PACKET_SIZE = 20;
-                    if (jsonStr.length() <= MAX_BLE_PACKET_SIZE) {
-                        if (xSemaphoreTake(bleSendMutex, portMAX_DELAY) == pdTRUE) {
-                            pCharacteristic->setValue(jsonStr.c_str());
-                            pCharacteristic->notify();
-                            xSemaphoreGive(bleSendMutex);
-                        }
-                    } else {
-                        sendDataInChunks(jsonStr);
-                    }
+                    // 统一走 TLV 帧封装路径，不再裸切 JSON
+                    sendJSONDataToBLE(jsonStr);
 
                     lastSentData.heart_rate = sensorData.heart_rate;
                     lastSentData.breath_rate = sensorData.breath_rate;
@@ -1482,8 +1492,9 @@ void sendDataInChunks(const String& data) {
 }
 
 /**
- * @brief 发送JSON数据到BLE
- * 将JSON格式数据通过BLE发送给客户端
+ * @brief 发送JSON数据到BLE（TLV帧封装）
+ * 将JSON字符串通过 BleProto::encodeLegacyJsonToFrame 转换为TLV帧后分包发送。
+ * 每包最大20字节，包间延迟10ms，使用互斥锁保证线程安全。
  * @param jsonData JSON格式数据字符串
  */
 void sendJSONDataToBLE(const String& jsonData) {
@@ -1491,29 +1502,36 @@ void sendJSONDataToBLE(const String& jsonData) {
         return;
     }
 
-    Serial.printf("[BLE发送] %s\n", jsonData.c_str());
-
     if (!deviceConnected) {
         xSemaphoreGive(bleSendMutex);
         return;
     }
 
-    const int MAX_PACKET_SIZE = 20;
-    int totalLength = jsonData.length();
-    int numChunks = (totalLength + MAX_PACKET_SIZE - 1) / MAX_PACKET_SIZE;
+    BleProto::Frame frame;
+    if (!BleProto::encodeLegacyJsonToFrame(jsonData, bleSequenceCounter++, frame)) {
+        Serial.printf("[BLE] JSON转TLV失败，原始数据: %s\n", jsonData.c_str());
+        xSemaphoreGive(bleSendMutex);
+        return;
+    }
 
-    for(int i = 0; i < numChunks; i++) {
-        int start = i * MAX_PACKET_SIZE;
-        int chunkLength = min(MAX_PACKET_SIZE, totalLength - start);
-        String chunk = jsonData.substring(start, start + chunkLength);
+    std::vector<uint8_t> raw = BleProto::encodeFrame(frame);
 
-        pCharacteristic->setValue(chunk.c_str());
+    const size_t MAX_PACKET_SIZE = 20;
+    size_t offset = 0;
+
+    while (offset < raw.size()) {
+        size_t chunkLen = min(MAX_PACKET_SIZE, raw.size() - offset);
+        pCharacteristic->setValue(raw.data() + offset, chunkLen);
         pCharacteristic->notify();
 
-        if (i < numChunks - 1) {
+        offset += chunkLen;
+        if (offset < raw.size()) {
             vTaskDelay(10 / portTICK_PERIOD_MS);
         }
     }
+
+    Serial.printf("[BLE] 已发送TLV帧 CMD=0x%02X, 总长=%u\n",
+                  frame.cmd, static_cast<unsigned>(raw.size()));
 
     xSemaphoreGive(bleSendMutex);
 }
@@ -1649,20 +1667,14 @@ bool processStopContinuousSend(JsonDocument& doc) {
  * 处理从BLE接收到的配置数据，解析JSON命令并执行相应操作
  */
 void processBLEConfig() {
-    unsigned long currentMillis = millis();
-
-    if (completeData.length() > 0 && receivedData.length() == 0 &&
-        (currentMillis - lastReceiveTime > 5000)) {
-        Serial.println("⏰ [超时] 数据接收超时5秒，自动当作接收完成");
-        Serial.printf("   completeData长度: %d, 内容: %s\n", completeData.length(), completeData.c_str());
-
-        receivedData = completeData;
-        completeData = "";
+    // 队列未初始化时直接返回，避免空指针访问
+    if (bleCommandQueue == nullptr) {
+        return;
     }
-
-    if (receivedData.length() > 0) {
-        String bleData = receivedData;
-        receivedData = "";
+    
+    BleCommandMessage msg;
+    while (xQueueReceive(bleCommandQueue, &msg, 0) == pdTRUE) {
+        String bleData = String(msg.json);
         bleData.trim();
 
         Serial.printf("[BLE] 解析: %s\n", bleData.c_str());
@@ -1672,46 +1684,32 @@ void processBLEConfig() {
             DeserializationError error = deserializeJson(doc, bleData);
 
             if (error) {
-                String errorMsg = String("{\"type\":\"error\",\"message\":\"JSON解析失败: ") + String(error.c_str()) + String("\",\"originalData\":\"") + bleData + String("\"}");
+                String errorMsg = String("{\"type\":\"error\",\"message\":\"JSON解析失败: ") +
+                                  String(error.c_str()) + String("\"}");
                 sendJSONDataToBLE(errorMsg);
-            } else {
-
-                bool processed = false;
-
-                if (!processed) processed = processSetDeviceId(doc);
-
-                if (!processed) processed = processWiFiConfigCommand(doc);
-
-                if (!processed) processed = processQueryStatus(doc);
-
-                if (!processed) processed = processQueryRadarData(doc);
-
-                if (!processed) processed = processStartContinuousSend(doc);
-
-                if (!processed) processed = processStopContinuousSend(doc);
-
-                if (!processed) processed = processScanWiFi(doc);
-
-                if (!processed) processed = processGetSavedNetworks(doc);
-
-                if (!processed) processed = processEchoRequest(doc);
-
-                if (!processed) {
-                    if (deviceConnected) {
-                        JsonDocument errorDoc;
-                        errorDoc["type"] = "error";
-                        errorDoc["message"] = "未知命令";
-                        errorDoc["receivedData"] = bleData;
-
-                        String responseMsg;
-                        serializeJson(errorDoc, responseMsg);
-
-                        sendJSONDataToBLE(responseMsg);
-                    }
-                }
+                continue;
             }
-        } else {
-            Serial.println("📥 [BLE] 接收到非JSON数据");
+
+            bool processed = false;
+            if (!processed) processed = processSetDeviceId(doc);
+            if (!processed) processed = processWiFiConfigCommand(doc);
+            if (!processed) processed = processQueryStatus(doc);
+            if (!processed) processed = processQueryRadarData(doc);
+            if (!processed) processed = processStartContinuousSend(doc);
+            if (!processed) processed = processStopContinuousSend(doc);
+            if (!processed) processed = processScanWiFi(doc);
+            if (!processed) processed = processGetSavedNetworks(doc);
+            if (!processed) processed = processEchoRequest(doc);
+
+            if (!processed && deviceConnected) {
+                JsonDocument errorDoc;
+                errorDoc["type"] = "error";
+                errorDoc["message"] = "未知命令";
+
+                String responseMsg;
+                serializeJson(errorDoc, responseMsg);
+                sendJSONDataToBLE(responseMsg);
+            }
         }
     }
 }
