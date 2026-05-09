@@ -38,7 +38,6 @@ extern uint64_t device_sn;
 extern bool deviceConnected;
 extern bool oldDeviceConnected;
 extern BLEServer* pServer;
-extern BLECharacteristic* pCharacteristic;
 extern NetworkStatus currentNetworkStatus;
 extern unsigned long lastBlinkTime;
 extern bool ledState;
@@ -58,6 +57,8 @@ extern uint32_t generateDeviceHash();
 extern std::string buildBLEManufacturerData();
 extern void refreshBLEAdvertisingData();
 extern String getDeviceMacAddress();
+extern void updateDeviceInfo();
+extern void updateRadarStatus();
 
 void initAllTasks();
 void WiFiEvent(WiFiEvent_t event);

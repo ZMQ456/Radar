@@ -10,8 +10,8 @@
 #include <esp_task_wdt.h>
 #include <Preferences.h>
 
-#undef MQTT_MAX_PACKET_SIZE
-#define MQTT_MAX_PACKET_SIZE 1024
+#undef MQTT_MAX_PACKET_SIZE // PubSubClient默认的最大包大小是256字节，增加到1024字节以支持更大的消息
+#define MQTT_MAX_PACKET_SIZE 1024//最大MQTT包大小
 
 class WiFiManager;
 
@@ -33,20 +33,20 @@ extern PubSubClient mqttClient;
 
 extern TaskHandle_t mqttTaskHandle;
 
-void mqttTask(void *parameter);
-String getMqttDeviceName();
-String getMqttClientId();
-String getMqttSubscribeTopic();
-String getMqttPropertyPostTopic();
-String makeMqttPassword(const String& clientId);
-String buildReplyTopic(const char* requestTopic);
-bool publishMqttReply(const char* requestTopic, const char* requestId, const char* requestMethod, int code, JsonVariant data);
-void mqttMessageCallback(char* topic, byte* payload, unsigned int length);
-void initMQTT();
-void reconnectMQTT();
-void checkMQTTStatus();
-void sendDailyDataToMQTT();
-void sendSleepDataToMQTT();
+void mqttTask(void *parameter);//MQTT任务函数
+String getMqttDeviceName();//获取MQTT设备名称
+String getMqttClientId();//获取MQTT客户端ID
+String getMqttSubscribeTopic();//获取MQTT订阅主题
+String getMqttPropertyPostTopic();//获取MQTT属性发布主题
+String makeMqttPassword(const String& clientId);//生成MQTT密码，用于认证
+String buildReplyTopic(const char* requestTopic);//构建回复MQTT主题，用于接收回复消息。
+bool publishMqttReply(const char* requestTopic, const char* requestId, const char* requestMethod, int code, JsonVariant data);//发布MQTT回复消息
+void mqttMessageCallback(char* topic, byte* payload, unsigned int length);//MQTT消息回调函数
+void initMQTT();//初始化MQTT
+void reconnectMQTT();//重新连接MQTT服务器
+void checkMQTTStatus();//检查MQTT连接状态
+void sendDailyDataToMQTT();//发送每日数据到MQTT
+void sendSleepDataToMQTT();//发送睡眠数据到MQTT
 void sendHeartbeatToMQTT();//发送心跳包
 
 // OTA相关函数

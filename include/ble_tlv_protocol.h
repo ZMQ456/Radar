@@ -78,7 +78,78 @@ enum TlvType : uint8_t {
     TLV_WIFI_CONFIGURED = 0x42,//WiFi配置
     TLV_WIFI_CONNECTED = 0x43,//WiFi连接
     TLV_ECHO_CONTENT = 0x44,//回显内容
+    
+    // 状态和步骤字段
+    TLV_STATE = 0x45,//状态 uint8
+    TLV_STEP = 0x46,//步骤 uint8
+    TLV_REASON = 0x47,//原因码 uint8
 };
+
+// 分层分域错误码定义 (高4位=模块，低4位=具体错误)
+namespace ErrorCode {
+    // 通用状态 (0x0_)
+    constexpr uint8_t SUCCESS = 0x00;              // 成功
+    constexpr uint8_t PROCESSING = 0x01;           // 已接收，处理中
+    constexpr uint8_t PARTIAL_SUCCESS = 0x02;      // 部分成功
+    constexpr uint8_t UNKNOWN = 0x0F;              // 未知结果
+    
+    // 协议层错误 (0x1_)
+    constexpr uint8_t ERR_PROTO_CRC_FAIL = 0x10;       // CRC校验失败
+    constexpr uint8_t ERR_PROTO_FRAME_INVALID = 0x11;  // 帧格式错误
+    constexpr uint8_t ERR_PROTO_LEN_INVALID = 0x12;    // 长度非法
+    constexpr uint8_t ERR_PROTO_CMD_UNKNOWN = 0x13;    // 未知命令
+    constexpr uint8_t ERR_PROTO_PARAM_MISSING = 0x14;  // 缺少参数
+    constexpr uint8_t ERR_PROTO_PARAM_INVALID = 0x15;  // 参数非法
+    constexpr uint8_t ERR_PROTO_BUSY = 0x16;           // 设备忙
+    constexpr uint8_t ERR_PROTO_TIMEOUT = 0x17;       // 协议处理超时
+    
+    // WiFi错误 (0x2_)
+    constexpr uint8_t ERR_WIFI_SCAN_TIMEOUT = 0x20;      // 扫描超时
+    constexpr uint8_t ERR_WIFI_SSID_NOT_FOUND = 0x21;    // 找不到SSID
+    constexpr uint8_t ERR_WIFI_WRONG_PASSWORD = 0x22;    // 密码错误
+    constexpr uint8_t ERR_WIFI_CONNECT_TIMEOUT = 0x23;   // 连接AP超时
+    constexpr uint8_t ERR_WIFI_IP_TIMEOUT = 0x24;        // 获取IP超时
+    constexpr uint8_t ERR_WIFI_SIGNAL_WEAK = 0x25;       // 信号太弱
+    constexpr uint8_t ERR_WIFI_BUSY = 0x26;              // WiFi正在被其他操作占用
+    constexpr uint8_t ERR_WIFI_DISCONNECTED = 0x27;      // 连接过程被断开
+    
+    // 雷达错误 (0x3_)
+    constexpr uint8_t ERR_RADAR_NO_DATA = 0x30;          // 无数据
+    constexpr uint8_t ERR_RADAR_UART_TIMEOUT = 0x31;     // UART超时
+    constexpr uint8_t ERR_RADAR_FRAME_INVALID = 0x32;    // 雷达帧异常
+    constexpr uint8_t ERR_RADAR_HW_FAULT = 0x33;         // 硬件故障
+    constexpr uint8_t ERR_RADAR_NOT_READY = 0x34;        // 雷达未就绪
+    
+    // 设备/状态错误 (0x4_)
+    constexpr uint8_t ERR_DEV_STATE_INVALID = 0x40;      // 当前状态不允许
+    constexpr uint8_t ERR_DEV_STORAGE_FAIL = 0x41;       // 存储失败
+    constexpr uint8_t ERR_DEV_QUEUE_FULL = 0x42;         // 队列已满
+    constexpr uint8_t ERR_DEV_NO_MEMORY = 0x43;          // 内存不足
+    constexpr uint8_t ERR_DEV_NOT_CONNECTED = 0x44;      // 设备未连接
+    
+    // 云端/网络错误 (0x5_)
+    constexpr uint8_t ERR_CLOUD_MQTT_FAIL = 0x50;        // MQTT失败
+    constexpr uint8_t ERR_CLOUD_HTTP_FAIL = 0x51;        // HTTP失败
+    constexpr uint8_t ERR_CLOUD_UPLOAD_TIMEOUT = 0x52;   // 上传超时
+}
+
+// 状态枚举
+namespace State {
+    constexpr uint8_t IDLE = 0x00;        // 空闲
+    constexpr uint8_t PROCESSING = 0x01;  // 处理中
+    constexpr uint8_t SUCCESS = 0x02;     // 成功
+    constexpr uint8_t FAILED = 0x03;      // 失败
+}
+
+// 步骤枚举
+namespace Step {
+    constexpr uint8_t NONE = 0x00;           // 无
+    constexpr uint8_t RECEIVED = 0x01;       // 已接收
+    constexpr uint8_t SCANNING = 0x02;       // 扫描中
+    constexpr uint8_t CONNECTING_AP = 0x03;  // 连接AP
+    constexpr uint8_t REQUESTING_IP = 0x04;  // 请求IP
+    constexpr uint8_t COMPLETED = 0x05;      // 完成
+}
 
 // WiFi安全类型枚举
 enum WifiSecurityType : uint8_t {

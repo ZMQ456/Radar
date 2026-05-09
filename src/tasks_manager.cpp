@@ -6,6 +6,9 @@
 #include <BLEDevice.h>
 #include <esp_task_wdt.h>
 
+// 外部常量声明
+extern const unsigned long SENSOR_TIMEOUT; // 传感器超时时间
+
 NetworkStatus currentNetworkStatus = NET_INITIAL;//当前网络状态，初始为初始网络状态
 unsigned long lastBlinkTime = 0;//上次闪烁时间
 bool ledState = false;//LED状态
@@ -66,14 +69,16 @@ uint32_t generateDeviceHash() {
 
     char macHex[13];
     snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);//将MAC地址转换为十六进制字符串
 
     char snStr[21];
-    snprintf(snStr, sizeof(snStr), "%llu", device_sn);
+    snprintf(snStr, sizeof(snStr), "%llu", device_sn);//将设备SN转换为字符串
 
-    String hashInput = String("SN") + String(snStr) + String("|") + String(macHex);
+    String hashInput = String("SN") + String(snStr) + String("|") + String(macHex);//将设备SN和MAC地址拼接为哈希输入
 
-    uint32_t hash = calculateCRC32((const uint8_t*)hashInput.c_str(), hashInput.length());
+    uint32_t hash = calculateCRC32((const uint8_t*)hashInput.c_str(), hashInput.length());//计算CRC32哈希值
+
+
 
     Serial.printf("🔐 [HASH] 输入: %s, 哈希: 0x%08X\n", hashInput.c_str(), hash);
 
@@ -86,30 +91,23 @@ uint32_t generateDeviceHash() {
  * @return 9字节厂商数据字符串
  */
 std::string buildBLEManufacturerData() {
-    std::string manufacturerData;
-    manufacturerData.reserve(9);
+    std::string manufacturerData;//厂商数据字符串
+    manufacturerData.reserve(4);
 
-    manufacturerData.push_back(static_cast<char>(0xFF));
-    manufacturerData.push_back(static_cast<char>(0xFF));
-    manufacturerData.push_back('R');
-    manufacturerData.push_back(0x01);
-    manufacturerData.push_back(0x00);
-
-    uint32_t snHash = generateDeviceHash();
-    manufacturerData.push_back(static_cast<char>((snHash >> 24) & 0xFF));
-    manufacturerData.push_back(static_cast<char>((snHash >> 16) & 0xFF));
-    manufacturerData.push_back(static_cast<char>((snHash >> 8) & 0xFF));
-    manufacturerData.push_back(static_cast<char>(snHash & 0xFF));
+    manufacturerData.push_back(static_cast<char>(0xFF));//BLE厂商数据标志（固定）
+    manufacturerData.push_back(static_cast<char>(0xFF));//厂商ID
+    manufacturerData.push_back(0x01);//设备类型（Radar）
+    manufacturerData.push_back(0x00);//设备类型（Radar）
 
     return manufacturerData;
 }
 
 /**
  * @brief 刷新BLE广播数据
- * 更新BLE广播的厂商数据和设备名称，使用SN码作为设备名
+ * 更新BLE广播的厂商数据和设备名称，使用设备SN或MAC地址（如果SN为0）作为设备名
  */
 void refreshBLEAdvertisingData() {
-    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();//获取BLE广播对象
     if (pAdvertising == nullptr) {
         Serial.println("⚠️ [BLE] 广播对象为空，无法刷新广播数据");
         return;
@@ -117,26 +115,36 @@ void refreshBLEAdvertisingData() {
 
     char snName[32];
     if (device_sn > 0) {
-        snprintf(snName, sizeof(snName), "Radar_%llu", device_sn);
+        snprintf(snName, sizeof(snName), "Radar_%llu", device_sn);//使用设备SN作为设备名
     } else {
         String macAddr = getDeviceMacAddress();
         macAddr.replace(":", "");
-        snprintf(snName, sizeof(snName), "Radar_%s", macAddr.c_str());
+        snprintf(snName, sizeof(snName), "Radar_%s", macAddr.c_str());//使用设备MAC地址作为设备名
     }
-
-    BLEAdvertisementData advertisementData;
-    advertisementData.setFlags(0x06);
-    advertisementData.setCompleteServices(BLEUUID(SERVICE_UUID));
-    advertisementData.setManufacturerData(buildBLEManufacturerData());
+    
+    BLEAdvertisementData advertisementData;//广告数据
+    advertisementData.setFlags(0x06);//设置广告标志（扫描响应）
+    advertisementData.setCompleteServices(BLEUUID(DEVICE_CONFIG_SERVICE_UUID));//设置设备配置服务UUID
+    advertisementData.setManufacturerData(buildBLEManufacturerData());//设置厂商数据
 
     BLEAdvertisementData scanResponseData;
     scanResponseData.setName(snName);
 
-    pAdvertising->setAdvertisementData(advertisementData);
-    pAdvertising->setScanResponseData(scanResponseData);
-    pAdvertising->setScanResponse(true);
-    pAdvertising->setMinPreferred(0x06);
-    pAdvertising->setMinPreferred(0x12);
+    // 手动添加 TX Power Level 字段
+    // 0x02: 本段长度 (类型1字节 + 数据1字节)
+    // 0x0A: AD Type (TX Power Level)
+    // 0x09: 数据值 (+9 dBm，ESP32 默认发射功率)
+    std::string txPowerField;
+    txPowerField.push_back(0x02);
+    txPowerField.push_back(0x0A);
+    txPowerField.push_back(0x09);
+    scanResponseData.addData(txPowerField);
+
+    pAdvertising->setAdvertisementData(advertisementData);//设置广告数据
+    pAdvertising->setScanResponseData(scanResponseData);//设置扫描响应数据
+    pAdvertising->setScanResponse(true);//设置扫描响应
+    pAdvertising->setMinPreferred(0x06);//设置最小优先级
+    pAdvertising->setMinPreferred(0x12);//设置最小优先级
 
     Serial.printf("📡 [BLE] 已刷新广播 ManufacturerData, device_sn=%llu\n", device_sn);
 }
@@ -156,16 +164,67 @@ String getDeviceMacAddress() {
 }
 
 /**
+ * @brief 更新设备信息特征
+ * 当设备ID或其他静态信息变化时更新设备信息特征
+ */
+void updateDeviceInfo() {
+    if (deviceInfoCharacteristic == nullptr) {
+        return;
+    }
+    
+    JsonDocument deviceInfoDoc;
+    deviceInfoDoc["deviceId"] = currentDeviceId;
+    deviceInfoDoc["protocolVersion"] = "1.0.0";
+    deviceInfoDoc["firmwareVersion"] = "2.1.0";
+    deviceInfoDoc["deviceType"] = "Radar";
+    deviceInfoDoc["macAddress"] = getDeviceMacAddress();
+    if (device_sn > 0) {
+        deviceInfoDoc["serialNumber"] = device_sn;
+    }
+    
+    String deviceInfoJson;
+    serializeJson(deviceInfoDoc, deviceInfoJson);
+    deviceInfoCharacteristic->setValue(deviceInfoJson.c_str());
+    
+    Serial.printf("📋 [BLE] 设备信息已更新: %s\n", deviceInfoJson.c_str());
+}
+
+/**
+ * @brief 更新雷达状态特征
+ * 更新低频状态信息，如持续发送状态、存在状态、工作状态等
+ */
+void updateRadarStatus() {
+    if (radarStatusCharacteristic == nullptr || !deviceConnected) {
+        return;
+    }
+    
+    JsonDocument statusDoc;
+    statusDoc["continuousSendEnabled"] = continuousSendEnabled;
+    statusDoc["continuousSendInterval"] = continuousSendInterval;
+    statusDoc["presenceStable"] = sensorData.presence;
+    statusDoc["workingState"] = (millis() - lastSensorUpdate < SENSOR_TIMEOUT) ? "active" : "timeout";
+    statusDoc["lastUpdateTime"] = millis();
+    statusDoc["sensorConnected"] = (millis() - lastSensorUpdate < SENSOR_TIMEOUT);
+    
+    String statusJson;
+    serializeJson(statusDoc, statusJson);
+    radarStatusCharacteristic->setValue(statusJson.c_str());
+    radarStatusCharacteristic->notify();
+    
+    Serial.printf("📊 [BLE] 雷达状态已更新: %s\n", statusJson.c_str());
+}
+
+/**
  * @brief 设置网络状态
  * 更新当前网络状态，并重置呼吸灯参数
  * @param status 网络状态
  */
 void setNetworkStatus(NetworkStatus status) {
-    currentNetworkStatus = status;
+    currentNetworkStatus = status;//更新当前网络状态
 
     if (status == NET_CONNECTED) {
-        breatheValue = BREATHE_MIN;
-        breatheIncreasing = true;
+        breatheValue = BREATHE_MIN;//重置呼吸灯值为最小
+        breatheIncreasing = true;//设置呼吸灯增加
     }
 }
 
@@ -176,25 +235,25 @@ void setNetworkStatus(NetworkStatus status) {
 void clearStoredConfig() {
     Serial.println("🧹 开始清除存储的配置...");
 
-    uint16_t oldDeviceId = preferences.getUShort("deviceId", 0);
+    uint16_t oldDeviceId = preferences.getUShort("deviceId", 0);//获取当前设备ID
 
     preferences.remove("deviceId");
     preferences.remove("wifi_first");
 
-    wifiManager.clearAllConfigs();
+    wifiManager.clearAllConfigs();//清除所有WiFi配置
 
     Serial.println("✅ 配置已清除完成");
     Serial.printf("🗑️ 被清除的设备ID: %u\n", oldDeviceId);
 
-    WiFi_Connect_First_bit = 1;
+    WiFi_Connect_First_bit = 1;//设置WiFi连接首次标志位为1
 
-    WiFi.disconnect(true);
-    setNetworkStatus(NET_DISCONNECTED);
+    WiFi.disconnect(true);//断开WiFi连接
+    setNetworkStatus(NET_DISCONNECTED);//设置网络状态为断开
 
     Serial.println("🔄 已清除Flash与内存中的配置，请重新配置WiFi和设备ID");
 
     if (deviceConnected) {
-        sendStatusToBLE();
+        sendStatusToBLE();//发送状态到BLE
     }
 }
 
@@ -206,18 +265,18 @@ void clearStoredConfig() {
 void bootButtonMonitorTask(void *parameter) {
     Serial.println("🔍 启动BOOT按钮监控任务...");
 
-    pinMode(CONFIG_CLEAR_PIN, OUTPUT);
-    digitalWrite(CONFIG_CLEAR_PIN, LOW);
+    pinMode(CONFIG_CLEAR_PIN, OUTPUT);//设置清除配置引脚为输出模式
+    digitalWrite(CONFIG_CLEAR_PIN, LOW);//设置清除配置引脚为低电平
 
-    unsigned long buttonPressStartTime = 0;
-    bool buttonPressed = false;
+    unsigned long buttonPressStartTime = 0;//按钮按下开始时间
+    bool buttonPressed = false;//按钮是否按下
 
     while (1) {
         int buttonState = digitalRead(BOOT_BUTTON_PIN);
 
         if (buttonState == LOW && !buttonPressed) {
-            buttonPressed = true;
-            buttonPressStartTime = millis();
+            buttonPressed = true;//按钮按下
+            buttonPressStartTime = millis();//记录按下时间
             Serial.println("⚠️ 检测到BOOT按钮按下，长按3秒将清除配置");
 
             digitalWrite(CONFIG_CLEAR_PIN, HIGH);
@@ -235,7 +294,7 @@ void bootButtonMonitorTask(void *parameter) {
                 clearConfigRequested = true;
                 forceLedOff = true;
 
-                clearStoredConfig();
+                clearStoredConfig();//清除存储的配置
 
                 Serial.println("🔄 系统即将重启...");
 
@@ -319,8 +378,8 @@ void ledControlTask(void *parameter) {
 
     pinMode(NETWORK_LED_PIN, OUTPUT);
     digitalWrite(NETWORK_LED_PIN, LOW);
-    ledcSetup(0, 5000, 8);
-    ledcAttachPin(NETWORK_LED_PIN, 0);
+    ledcSetup(0, 5000, 8);//设置LED引脚为PWM模式，频率5000Hz，分辨率8位
+    ledcAttachPin(NETWORK_LED_PIN, 0);//将LED引脚与PWM通道0关联
 
     while (1) {
         if (forceLedOff) {
@@ -330,20 +389,20 @@ void ledControlTask(void *parameter) {
         }
 
         switch (currentNetworkStatus) {
-            case NET_INITIAL:
-            case NET_DISCONNECTED:
+            case NET_INITIAL://初始状态，LED慢闪
+            case NET_DISCONNECTED://断开状态，LED慢闪
                 if (millis() - lastBlinkTime >= SLOW_BLINK_INTERVAL) {
-                    ledState = !ledState;
+                    ledState = !ledState;//切换LED状态
                     if(ledState) {
-                        ledcWrite(0, 255);
+                        ledcWrite(0, 255);//LED亮起
                     } else {
-                        ledcWrite(0, 0);
+                        ledcWrite(0, 0);//LED熄灭
                     }
                     lastBlinkTime = millis();
                 }
                 break;
 
-            case NET_CONNECTING:
+            case NET_CONNECTING://连接中状态，LED快闪
                 if (millis() - lastBlinkTime >= FAST_BLINK_INTERVAL) {
                     ledState = !ledState;
                     if(ledState) {
@@ -355,12 +414,12 @@ void ledControlTask(void *parameter) {
                 }
                 break;
 
-            case NET_CONNECTED:
+            case NET_CONNECTED://已连接状态，LED呼吸灯效果
                 if (millis() - lastBlinkTime >= BREATHE_INTERVAL) {
-                    ledcWrite(0, breatheValue);
+                    ledcWrite(0, breatheValue);//根据breatheValue设置LED亮度
 
                     if (breatheIncreasing) {
-                        breatheValue += BREATHE_STEP;
+                        breatheValue += BREATHE_STEP;//增加breatheValue
                         if (breatheValue >= BREATHE_MAX) {
                             breatheValue = BREATHE_MAX;
                             breatheIncreasing = false;
@@ -383,24 +442,24 @@ void ledControlTask(void *parameter) {
 
 void WiFiEvent(WiFiEvent_t event) {
     switch (event) {
-        case ARDUINO_EVENT_WIFI_STA_START:
-            setNetworkStatus(NET_INITIAL);
+        case ARDUINO_EVENT_WIFI_STA_START://WiFi启动事件
+            setNetworkStatus(NET_INITIAL);//设置网络状态为初始状态
             break;
 
-        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
-            setNetworkStatus(NET_CONNECTING);
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED://WiFi连接成功事件
+            setNetworkStatus(NET_CONNECTING);//设置网络状态为连接中状态
             break;
 
-        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-            setNetworkStatus(NET_CONNECTED);
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP://WiFi获取IP地址事件
+            setNetworkStatus(NET_CONNECTED);//设置网络状态为已连接状态
             break;
 
-        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-            setNetworkStatus(NET_DISCONNECTED);
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED://WiFi断开事件
+            setNetworkStatus(NET_DISCONNECTED);//设置网络状态为断开状态
             break;
 
-        case ARDUINO_EVENT_WIFI_STA_STOP:
-            setNetworkStatus(NET_DISCONNECTED);
+        case ARDUINO_EVENT_WIFI_STA_STOP://WiFi停止事件
+            setNetworkStatus(NET_DISCONNECTED);//设置网络状态为断开状态
             break;
     }
 }
@@ -470,42 +529,99 @@ void bleConfigTask(void *parameter) {
 
     char snName[32];
     if (device_sn > 0) {
-        snprintf(snName, sizeof(snName), "Radar_%llu", device_sn);
+        snprintf(snName, sizeof(snName), "Radar_%llu", device_sn);//设置设备名称为Radar_设备序列号
     } else {
         String macAddr = getDeviceMacAddress();
-        macAddr.replace(":", "");
-        snprintf(snName, sizeof(snName), "Radar_%s", macAddr.c_str());
+        macAddr.replace(":", "");//将MAC地址中的":"替换为空字符串
+        snprintf(snName, sizeof(snName), "Radar_%s", macAddr.c_str());//设置设备名称为Radar_设备地址
     }
-    BLEDevice::init(snName);
-    pServer = BLEDevice::createServer();
-    pServer->setCallbacks(new MyServerCallbacks());
+    BLEDevice::init(snName);//初始化BLE设备
+    BLEDevice::setMTU(TARGET_ATT_MTU);
+    Serial.printf("[BLE] 请求目标 MTU: %u\n", TARGET_ATT_MTU);
+    
+    pServer = BLEDevice::createServer();//创建BLE服务器
+    pServer->setCallbacks(new MyServerCallbacks());//设置BLE服务器回调函数
 
-    BLEService *pService = pServer->createService(SERVICE_UUID);
-    pCharacteristic = pService->createCharacteristic(
-                        CHARACTERISTIC_UUID,
-                        BLECharacteristic::PROPERTY_READ |
-                        BLECharacteristic::PROPERTY_WRITE |
-                        BLECharacteristic::PROPERTY_NOTIFY
-                      );
-    pCharacteristic->setCallbacks(new MyCallbacks());
-    pCharacteristic->addDescriptor(new BLE2902());
+    // 创建双服务
+    radarDataService = pServer->createService(RADAR_DATA_SERVICE_UUID);//创建雷达数据服务
+    deviceConfigService = pServer->createService(DEVICE_CONFIG_SERVICE_UUID);//创建设备配置服务
 
-    pService->start();
-    refreshBLEAdvertisingData();
-    BLEDevice::startAdvertising();
+    // Radar Data Service
+    radarStreamCharacteristic = radarDataService->createCharacteristic(
+        RADAR_STREAM_CHAR_UUID,
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
+    radarStreamCharacteristic->addDescriptor(new BLE2902());
+
+    radarStatusCharacteristic = radarDataService->createCharacteristic(
+        RADAR_STATUS_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ |
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
+    radarStatusCharacteristic->addDescriptor(new BLE2902());
+
+    // Device Config Service
+    deviceCommandCharacteristic = deviceConfigService->createCharacteristic(
+        DEVICE_COMMAND_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    deviceCommandCharacteristic->setCallbacks(new MyCallbacks());
+
+    deviceResultCharacteristic = deviceConfigService->createCharacteristic(
+        DEVICE_RESULT_CHAR_UUID,
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
+    deviceResultCharacteristic->addDescriptor(new BLE2902());
+
+    deviceInfoCharacteristic = deviceConfigService->createCharacteristic(
+        DEVICE_INFO_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ
+    );
+
+    // 初始化设备信息特征 - 静态信息，连接后可读
+    JsonDocument deviceInfoDoc;
+    deviceInfoDoc["deviceId"] = currentDeviceId;
+    deviceInfoDoc["protocolVersion"] = "1.0.0";
+    deviceInfoDoc["firmwareVersion"] = "2.1.0";
+    deviceInfoDoc["deviceType"] = "Radar";
+    deviceInfoDoc["macAddress"] = getDeviceMacAddress();
+    if (device_sn > 0) {
+        deviceInfoDoc["serialNumber"] = device_sn;
+    }
+    
+    String deviceInfoJson;
+    serializeJson(deviceInfoDoc, deviceInfoJson);
+    deviceInfoCharacteristic->setValue(deviceInfoJson.c_str());
+    
+    Serial.printf("📋 [BLE] 设备信息特征已初始化: %s\n", deviceInfoJson.c_str());
+    
+    refreshBLEAdvertisingData();//刷新BLE广播数据
+    BLEDevice::startAdvertising();//启动BLE广播
 
     Serial.println(String("✅ BLE已启动，设备名称: ") + snName);
 
-    while(1) {
-        processBLEConfig();
+    static unsigned long lastRadarStatusUpdate = 0;
+    const unsigned long RADAR_STATUS_UPDATE_INTERVAL = 5000; // 每5秒更新一次雷达状态
 
-        if (!deviceConnected && oldDeviceConnected) {
+    while(1) {
+        processBLEConfig();//处理BLE配置命令
+
+        // 定期更新雷达状态特征
+        unsigned long currentTime = millis();
+        if (deviceConnected && (currentTime - lastRadarStatusUpdate >= RADAR_STATUS_UPDATE_INTERVAL)) {
+            updateRadarStatus();
+            lastRadarStatusUpdate = currentTime;
+        }
+
+        if (!deviceConnected && oldDeviceConnected) {//如果设备断开连接且之前连接过
             vTaskDelay(500 / portTICK_PERIOD_MS);
-            pServer->startAdvertising();
+            pServer->startAdvertising();//启动BLE广播
             Serial.println("开始BLE广播");
             oldDeviceConnected = deviceConnected;
         }
-        if (deviceConnected && !oldDeviceConnected) {
+        if (deviceConnected && !oldDeviceConnected) {//如果设备连接且之前未连接过
+            // 连接后立即更新一次雷达状态
+            updateRadarStatus();
             oldDeviceConnected = deviceConnected;
         }
 
@@ -520,7 +636,7 @@ void bleConfigTask(void *parameter) {
  */
 void radarCmdTask(void *parameter) {
     Serial.println("📡 雷达命令发送任务启动");
-    initR60ABD1();
+    initR60ABD1();//初始化雷达模组
 
     static const uint8_t radar_cmds[][3] = {
         {0x84, 0x81, 0x0F},  // 0x81: 查询心率/呼吸率
@@ -536,12 +652,12 @@ void radarCmdTask(void *parameter) {
         {0x84, 0x90, 0x0F}   // 0x90: 查询综合状态
     };
 
-    static size_t cmdIndex = 0;
-    static unsigned long lastCmdMillis = 0;
-    const unsigned long CMD_INTERVAL = 2000UL;
+    static size_t cmdIndex = 0;//当前命令索引
+    static unsigned long lastCmdMillis = 0;//上次发送命令的时间戳
+    const unsigned long CMD_INTERVAL = 2000UL;//命令发送间隔
 
     while (1) {
-        unsigned long now = millis();
+        unsigned long now = millis();//获取当前时间戳
 
         if (now - lastCmdMillis >= CMD_INTERVAL) {
             sendRadarCommand(
@@ -638,13 +754,13 @@ void emotionAnalysisTask(void *parameter) {
  * 创建并启动所有后台任务：BOOT按钮监控、LED控制、WiFi监控、MQTT、BLE配置、雷达命令发送、情绪分析、睡眠分析
  */
 void initAllTasks() {
-    loadDeviceSN();
-    xTaskCreate(bootButtonMonitorTask, "Boot Button Monitor Task", 2048, NULL, 1, NULL);
-    xTaskCreate(ledControlTask, "LED Control Task", 2048, NULL, 1, NULL);
-    xTaskCreate(wifiMonitorTask, "WiFi Monitor Task", 4096, NULL, 2, NULL);
-    xTaskCreatePinnedToCore(mqttTask, "MQTT Task", 8192, NULL, 2, &mqttTaskHandle, 1);
-    xTaskCreate(bleConfigTask, "BLE Config Task", 4096, NULL, 1, NULL);
-    xTaskCreate(radarCmdTask, "Radar Cmd Task", 2048, NULL, 2, NULL);
-    xTaskCreate(emotionAnalysisTask, "Emotion Analysis Task", 4096, NULL, 1, NULL);
-    xTaskCreate(sleepAnalysisTask, "Sleep Analysis Task", 4096, NULL, 1, NULL);
+    loadDeviceSN();//加载设备序列号
+    xTaskCreate(bootButtonMonitorTask, "Boot Button Monitor Task", 2048, NULL, 1, NULL);//创建BOOT按钮监控任务
+    xTaskCreate(ledControlTask, "LED Control Task", 2048, NULL, 1, NULL);//创建LED控制任务
+    xTaskCreate(wifiMonitorTask, "WiFi Monitor Task", 4096, NULL, 2, NULL);//创建WiFi监控任务
+    xTaskCreatePinnedToCore(mqttTask, "MQTT Task", 8192, NULL, 2, &mqttTaskHandle, 1);//创建MQTT任务
+    xTaskCreate(bleConfigTask, "BLE Config Task", 4096, NULL, 1, NULL);//创建BLE配置任务
+    xTaskCreate(radarCmdTask, "Radar Cmd Task", 2048, NULL, 2, NULL);//创建雷达命令发送任务
+    xTaskCreate(emotionAnalysisTask, "Emotion Analysis Task", 4096, NULL, 1, NULL);//创建情绪分析任务
+    xTaskCreate(sleepAnalysisTask, "Sleep Analysis Task", 4096, NULL, 1, NULL);//创建睡眠分析任务
 }

@@ -36,16 +36,16 @@ struct OtaUpgradeTask {
     String rawPayload;
 };
 
-void initOtaManager();
-void resetOtaTask();
-bool hasPendingOtaTask();
-OtaState getOtaState();
-const OtaUpgradeTask& getCurrentOtaTask();
-bool hasExecutableOtaTask();
+void initOtaManager();//初始化OTA管理器
+void resetOtaTask();//重置OTA任务
+bool hasPendingOtaTask();//检查是否有待处理的OTA任务
+OtaState getOtaState();//获取当前OTA状态
+const OtaUpgradeTask& getCurrentOtaTask();//获取当前OTA任务
+bool hasExecutableOtaTask();//检查是否有可执行的OTA任务
 
-bool parseOtaUpgradeMessage(const String& payload, OtaUpgradeTask& task, String& errorMsg);
-bool validateOtaUpgradeTask(const OtaUpgradeTask& task, String& errorMsg, int& errorStep);
-void storeOtaTask(const OtaUpgradeTask& task);
-void markOtaState(OtaState state);
+bool parseOtaUpgradeMessage(const String& payload, OtaUpgradeTask& task, String& errorMsg);//解析OTA升级消息
+bool validateOtaUpgradeTask(const OtaUpgradeTask& task, String& errorMsg, int& errorStep);//验证OTA升级任务
+void storeOtaTask(const OtaUpgradeTask& task);//存储OTA任务
+void markOtaState(OtaState state);//标记OTA状态 
 
 #endif

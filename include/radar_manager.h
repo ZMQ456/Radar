@@ -16,8 +16,16 @@
 
 class WiFiManager;
 
-#define SERVICE_UUID        "a8c1e5c0-3d5d-4a9d-8d5e-7c8b6a4e2f1a" // BLE服务UUID
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8" // BLE特征值UUID
+// Radar Data Service
+#define RADAR_DATA_SERVICE_UUID      "a8c1e5c0-3d5d-4a9d-8d5e-7c8b6a4e2f1a"
+#define RADAR_STREAM_CHAR_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26a1"
+#define RADAR_STATUS_CHAR_UUID       "beb5483e-36e1-4688-b7f5-ea07361b26a2"
+
+// Device Config Service
+#define DEVICE_CONFIG_SERVICE_UUID   "a8c1e5c0-3d5d-4a9d-8d5e-7c8b6a4e2f1b"
+#define DEVICE_COMMAND_CHAR_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26b1"
+#define DEVICE_RESULT_CHAR_UUID      "beb5483e-36e1-4688-b7f5-ea07361b26b2"
+#define DEVICE_INFO_CHAR_UUID        "beb5483e-36e1-4688-b7f5-ea07361b26b3"
 #define UART_RX_BUFFER_SIZE 4096 // UART接收缓冲区大小
 #define QUEUE_SIZE 200 // 队列大小（增加到200以防止溢出）
 #define TASK_STACK_SIZE 8192 // 任务堆栈大小
@@ -174,12 +182,29 @@ extern TaskHandle_t bleSendTaskHandle; // BLE发送任务句柄
 extern TaskHandle_t vitalSendTaskHandle; // 生命体征发送任务句柄
 extern TaskHandle_t uartProcessTaskHandle; // UART处理任务句柄
 extern BLEServer* pServer; // BLE服务器指针
-extern BLECharacteristic* pCharacteristic; // BLE特征值指针
+
+// Radar Data Service
+extern BLEService* radarDataService;
+extern BLECharacteristic* radarStreamCharacteristic;
+extern BLECharacteristic* radarStatusCharacteristic;
+
+// Device Config Service
+extern BLEService* deviceConfigService;
+extern BLECharacteristic* deviceCommandCharacteristic;
+extern BLECharacteristic* deviceResultCharacteristic;
+extern BLECharacteristic* deviceInfoCharacteristic;
 extern bool deviceConnected; // 设备连接状态
 extern bool oldDeviceConnected; // 旧设备连接状态
 extern BleProto::FrameParser bleFrameParser; // BLE帧解析器
 extern uint8_t bleSequenceCounter; // BLE序列号计数器
 extern QueueHandle_t bleCommandQueue; // BLE命令队列
+
+// BLE MTU 协商相关常量和变量
+static constexpr uint16_t DEFAULT_ATT_MTU = 23;
+static constexpr uint16_t TARGET_ATT_MTU  = 247;
+static constexpr size_t ATT_HEADER_SIZE   = 3;
+static constexpr size_t FALLBACK_PAYLOAD  = 20;
+extern size_t g_blePayloadSize;
 extern bool continuousSendEnabled; // 持续发送使能标志
 extern unsigned long continuousSendInterval; // 持续发送间隔
 extern unsigned long lastSleepDataTime; // 上次发送睡眠数据时间
@@ -187,6 +212,8 @@ extern BLEFlowController bleFlow; // BLE流控制器
 extern unsigned long lastSensorUpdate; // 上次传感器更新时间
 extern LastSentData lastSentData; // 上次发送的数据
 extern unsigned long lastCheckTime; // 上次检测时间
+
+extern const unsigned long SENSOR_TIMEOUT; // 传感器超时时间
 
 extern uint16_t currentDeviceId; // 当前设备ID
 extern Preferences preferences; // Flash存储对象
@@ -204,10 +231,11 @@ void vitalSendTask(void *parameter);
 void radarDataTask(void *parameter);
 void uartProcessTask(void *parameter);
 
-void sendDataInChunks(const String& data);
 void sendJSONDataToBLE(const String& jsonData);
+void sendCommandResultToBLE(const String& jsonData);
+void sendRadarStreamToBLE(const String& jsonData);
+void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar);
 bool sendCustomJSONData(const String& jsonType, const String& jsonString);
-void sendRadarDataToBLE();
 
 bool processQueryRadarData(JsonDocument& doc);
 bool processStartContinuousSend(JsonDocument& doc);
@@ -227,8 +255,10 @@ bool sendDailyDataToInfluxDB(String dailyDataLine);
 void sendSleepDataToInfluxDB();
 
 class MyServerCallbacks: public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer);
-    void onDisconnect(BLEServer* pServer);
+    void onConnect(BLEServer* pServer) override;
+    void onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) override;
+    void onDisconnect(BLEServer* pServer) override;
+    void onMtuChanged(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) override;
 };
 
 class MyCallbacks: public BLECharacteristicCallbacks {

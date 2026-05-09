@@ -317,7 +317,9 @@ bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame) {
 
     if (t == "status" || t == "deviceStatus") {
         frame.cmd = CMD_STATUS_RESP;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, 0);
+        appendTlvU8(frame.data, TLV_RESULT_CODE, ErrorCode::SUCCESS);
+        appendTlvU8(frame.data, TLV_STATE, State::SUCCESS);
+        appendTlvU8(frame.data, TLV_STEP, Step::COMPLETED);
         appendTlvString(frame.data, TLV_DEVICE_ID, String(doc["deviceId"] | 0));
         appendTlvU8(frame.data, TLV_WIFI_CONFIGURED, (doc["wifiConfigured"] | false) ? 1 : 0);
         appendTlvU8(frame.data, TLV_WIFI_CONNECTED, (doc["wifiConnected"] | false) ? 1 : 0);
@@ -327,7 +329,8 @@ bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame) {
 
     if (t == "radarData") {
         frame.cmd = CMD_RADAR_RESP;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? 0 : 1);
+        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? ErrorCode::SUCCESS : ErrorCode::ERR_RADAR_NO_DATA);
+        appendTlvU8(frame.data, TLV_STATE, (doc["success"] | false) ? State::SUCCESS : State::FAILED);
         appendTlvU32(frame.data, TLV_TIMESTAMP, static_cast<uint32_t>(doc["timestamp"] | 0));
         appendTlvString(frame.data, TLV_DEVICE_ID, String(doc["deviceId"] | 0));
         appendTlvU8(frame.data, TLV_PRESENCE, static_cast<uint8_t>(doc["presence"] | 0));
@@ -341,7 +344,8 @@ bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame) {
 
     if (t == "startContinuousSendResult") {
         frame.cmd = CMD_START_CONTINUOUS_RESP;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? 0 : 1);
+        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? ErrorCode::SUCCESS : ErrorCode::ERR_DEV_STATE_INVALID);
+        appendTlvU8(frame.data, TLV_STATE, (doc["success"] | false) ? State::SUCCESS : State::FAILED);
         if (doc["interval"].is<int>()) {
             appendTlvU16(frame.data, TLV_INTERVAL_MS, static_cast<uint16_t>(doc["interval"].as<int>()));
         }
@@ -353,7 +357,8 @@ bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame) {
 
     if (t == "stopContinuousSendResult") {
         frame.cmd = CMD_STOP_CONTINUOUS_RESP;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? 0 : 1);
+        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? ErrorCode::SUCCESS : ErrorCode::ERR_DEV_STATE_INVALID);
+        appendTlvU8(frame.data, TLV_STATE, (doc["success"] | false) ? State::SUCCESS : State::FAILED);
         if (doc["message"].is<const char*>()) {
             appendTlvString(frame.data, TLV_MESSAGE, String(doc["message"].as<const char*>()));
         }
@@ -362,7 +367,44 @@ bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame) {
 
     if (t == "wifiConfigResult" || t == "wifiConnected") {
         frame.cmd = CMD_WIFI_CONFIG_RESP;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? 0 : 1);
+        bool success = doc["success"] | false;
+        
+        // 根据消息内容判断具体的错误码
+        String message = String(doc["message"] | "");
+        uint8_t resultCode = ErrorCode::SUCCESS;
+        uint8_t state = State::SUCCESS;
+        uint8_t step = Step::COMPLETED;
+        
+        if (!success) {
+            state = State::FAILED;
+            if (message.indexOf("正在被其他操作占用") >= 0) {
+                resultCode = ErrorCode::ERR_WIFI_BUSY;
+                step = Step::RECEIVED;
+            } else if (message.indexOf("扫描超时") >= 0) {
+                resultCode = ErrorCode::ERR_WIFI_SCAN_TIMEOUT;
+                step = Step::SCANNING;
+            } else if (message.indexOf("未扫描到任何WiFi") >= 0) {
+                resultCode = ErrorCode::ERR_WIFI_SSID_NOT_FOUND;
+                step = Step::SCANNING;
+            } else if (message.indexOf("信号过弱") >= 0) {
+                resultCode = ErrorCode::ERR_WIFI_SIGNAL_WEAK;
+                step = Step::SCANNING;
+            } else if (message.indexOf("未找到目标WiFi") >= 0) {
+                resultCode = ErrorCode::ERR_WIFI_SSID_NOT_FOUND;
+                step = Step::SCANNING;
+            } else if (message.indexOf("密码") >= 0) {
+                resultCode = ErrorCode::ERR_WIFI_WRONG_PASSWORD;
+                step = Step::CONNECTING_AP;
+            } else {
+                resultCode = ErrorCode::ERR_WIFI_CONNECT_TIMEOUT;
+                step = Step::CONNECTING_AP;
+            }
+        }
+        
+        appendTlvU8(frame.data, TLV_RESULT_CODE, resultCode);
+        appendTlvU8(frame.data, TLV_STATE, state);
+        appendTlvU8(frame.data, TLV_STEP, step);
+        
         if (doc["message"].is<const char*>()) {
             appendTlvString(frame.data, TLV_MESSAGE, String(doc["message"].as<const char*>()));
         }
@@ -377,21 +419,24 @@ bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame) {
 
     if (t == "scanWiFiResult") {
         frame.cmd = CMD_WIFI_SCAN_RESP;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? 0 : 1);
+        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? ErrorCode::SUCCESS : ErrorCode::ERR_WIFI_SCAN_TIMEOUT);
+        appendTlvU8(frame.data, TLV_STATE, (doc["success"] | false) ? State::SUCCESS : State::FAILED);
         encodeWifiItems(doc["networks"], frame.data);
         return true;
     }
 
     if (t == "savedNetworksResult" || t == "savedNetworks") {
         frame.cmd = CMD_GET_SAVED_WIFI_RESP;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? 0 : 1);
+        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? ErrorCode::SUCCESS : ErrorCode::ERR_DEV_STORAGE_FAIL);
+        appendTlvU8(frame.data, TLV_STATE, (doc["success"] | false) ? State::SUCCESS : State::FAILED);
         encodeWifiItems(doc["networks"], frame.data);
         return true;
     }
 
     if (t == "setDeviceIdResult") {
         frame.cmd = CMD_SET_DEVICE_ID_RESP;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? 0 : 1);
+        appendTlvU8(frame.data, TLV_RESULT_CODE, (doc["success"] | false) ? ErrorCode::SUCCESS : ErrorCode::ERR_PROTO_PARAM_INVALID);
+        appendTlvU8(frame.data, TLV_STATE, (doc["success"] | false) ? State::SUCCESS : State::FAILED);
         if (doc["newDeviceId"].is<int>()) {
             appendTlvString(frame.data, TLV_DEVICE_ID, String(doc["newDeviceId"].as<int>()));
         }
@@ -403,7 +448,8 @@ bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame) {
 
     if (t == "echoResponse" || t == "rawEchoResponse") {
         frame.cmd = CMD_PING_RESP;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, 0);
+        appendTlvU8(frame.data, TLV_RESULT_CODE, ErrorCode::SUCCESS);
+        appendTlvU8(frame.data, TLV_STATE, State::SUCCESS);
         if (doc["originalContent"].is<const char*>()) {
             appendTlvString(frame.data, TLV_ECHO_CONTENT, String(doc["originalContent"].as<const char*>()));
         } else if (doc["originalData"].is<const char*>()) {
@@ -417,7 +463,8 @@ bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame) {
     if (t == "error") {
         frame.cmd = CMD_ERROR_RESP;
         frame.flags |= FLAG_IS_ERROR;
-        appendTlvU8(frame.data, TLV_RESULT_CODE, 1);
+        appendTlvU8(frame.data, TLV_RESULT_CODE, ErrorCode::UNKNOWN);
+        appendTlvU8(frame.data, TLV_STATE, State::FAILED);
         appendTlvString(frame.data, TLV_ERROR_MESSAGE, String(doc["message"] | "unknown error"));
         return true;
     }

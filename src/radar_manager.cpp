@@ -28,6 +28,8 @@ static int dnsFailCount = 0; // DNS解析失败计数器
 const int DNS_FAIL_RESET_THRESHOLD = 3; // DNS失败重置网络阈值
 
 void resetWiFiConnection(); // WiFi连接重置函数声明
+void sendCommandResultToBLE(const String& jsonData); // BLE命令结果发送函数声明
+void sendRadarStreamToBLE(const String& jsonData); // BLE雷达数据流发送函数声明
 
 //const char* influxDBHost = "8.134.11.76"; // InfluxDB服务器公网地址
 const char* influxDBHost = "www.lmhrt.cn";  // InfluxDB服务器域名地址
@@ -49,7 +51,17 @@ TaskHandle_t vitalSendTaskHandle = NULL; // 生命体征发送任务句柄
 TaskHandle_t uartProcessTaskHandle = NULL; // UART处理任务句柄
 
 BLEServer* pServer = NULL; // BLE服务器指针
-BLECharacteristic* pCharacteristic = NULL; // BLE特征值指针
+
+// Radar Data Service
+BLEService* radarDataService = NULL;
+BLECharacteristic* radarStreamCharacteristic = NULL;
+BLECharacteristic* radarStatusCharacteristic = NULL;
+
+// Device Config Service
+BLEService* deviceConfigService = NULL;
+BLECharacteristic* deviceCommandCharacteristic = NULL;
+BLECharacteristic* deviceResultCharacteristic = NULL;
+BLECharacteristic* deviceInfoCharacteristic = NULL;
 
 bool deviceConnected = false; // 设备连接状态
 bool oldDeviceConnected = false; // 旧设备连接状态
@@ -62,6 +74,9 @@ SemaphoreHandle_t bleSendMutex; // BLE发送互斥锁
 
 BleProto::FrameParser bleFrameParser; // BLE帧解析器（TLV协议）
 uint8_t bleSequenceCounter = 0;       // BLE出站帧序列号计数器
+
+// BLE MTU 协商相关变量
+size_t g_blePayloadSize = FALLBACK_PAYLOAD;
 
 // BLE命令处理常量
 static const size_t MAX_LEGACY_JSON_LEN = sizeof(BleCommandMessage::json) - 1; // legacy JSON兼容队列限制，不是TLV协议限制
@@ -148,6 +163,44 @@ void MyServerCallbacks::onConnect(BLEServer* pServer) {
     Serial.println("✅ [BLE] 客户端已连接");
 }
 
+void MyServerCallbacks::onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) {
+    uint16_t mtu = pServer->getPeerMTU(param->connect.conn_id);
+    
+    if (mtu >= DEFAULT_ATT_MTU) {
+        g_blePayloadSize = mtu - ATT_HEADER_SIZE;
+    } else {
+        g_blePayloadSize = FALLBACK_PAYLOAD;
+    }
+    
+    if (g_blePayloadSize < FALLBACK_PAYLOAD) {
+        g_blePayloadSize = FALLBACK_PAYLOAD;
+    }
+    
+    Serial.printf("✅ [BLE] 连接建立, conn_id=%u, MTU=%u, payload=%u\n",
+                  param->connect.conn_id,
+                  mtu,
+                  static_cast<unsigned>(g_blePayloadSize));
+}
+
+void MyServerCallbacks::onMtuChanged(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
+    uint16_t mtu = pServer->getPeerMTU(param->mtu.conn_id);
+    
+    if (mtu >= DEFAULT_ATT_MTU) {
+        g_blePayloadSize = mtu - ATT_HEADER_SIZE;
+    } else {
+        g_blePayloadSize = FALLBACK_PAYLOAD;
+    }
+    
+    if (g_blePayloadSize < FALLBACK_PAYLOAD) {
+        g_blePayloadSize = FALLBACK_PAYLOAD;
+    }
+    
+    Serial.printf("📏 [BLE] MTU 已更新, conn_id=%u, MTU=%u, payload=%u\n",
+                  param->mtu.conn_id,
+                  mtu,
+                  static_cast<unsigned>(g_blePayloadSize));
+}
+
 /**
  * @brief BLE服务器断开连接回调
  * 当客户端断开连接时触发
@@ -155,8 +208,9 @@ void MyServerCallbacks::onConnect(BLEServer* pServer) {
  */
 void MyServerCallbacks::onDisconnect(BLEServer* pServer) {
     deviceConnected = false;
-    Serial.println("🔴 [BLE] 客户端已断开");
     continuousSendEnabled = false;
+    g_blePayloadSize = FALLBACK_PAYLOAD;
+    Serial.println("🔴 [BLE] 客户端已断开, payload 恢复为 20");
 }
 
 /**
@@ -727,7 +781,7 @@ bool isDataChanged() {
  * @param parameter 任务参数（未使用）
  */
 void bleSendTask(void *parameter) {
-    Serial.println("🔁 R60ABD1 BLE data send task started");
+    Serial.println("🔁 R60ABD1 BLE data send task started (纯TLV模式)");
     
     while (1) {
         esp_task_wdt_reset();
@@ -742,47 +796,47 @@ void bleSendTask(void *parameter) {
                 
                 // 检查数据是否发生变化
                 if (isDataChanged()) {
-                    // 构建JSON数据
-                    JsonDocument doc;
-                    doc["method"] = "ble.event.data.post";
-                    doc["deviceId"] = getDeviceMacAddress();
-                    doc["reportType"] = "radar";
-                    doc["success"] = true;
+                    // 构建TLV帧
+                    BleProto::Frame frame;
+                    frame.version = BleProto::VERSION;
+                    frame.cmd = BleProto::CMD_CONTINUOUS_PUSH;
+                    frame.flags = 0;
+                    frame.seq = bleSequenceCounter++;
+                    frame.data.clear();
                     
-                    JsonObject params = doc["params"].to<JsonObject>();
+                    // 添加时间戳
+                    BleProto::appendTlvU32(frame.data, BleProto::TLV_TIMESTAMP, currentTime);
                     
                     if (sensorData.presence > 0) {
-                        params["heartRate"] = sensorData.heart_rate;
-                        params["breathingRate"] = sensorData.breath_rate;
-                        params["heartbeatWaveform"] = (int)sensorData.heart_waveform[0];
-                        params["breathingWaveform"] = (int)sensorData.breath_waveform[0];
-                        params["personDetected"] = sensorData.presence;
-                        params["humanActivity"] = sensorData.motion;
-                        params["sleepState"] = sensorData.sleep_state;
-                        params["humanDistance"] = sensorData.distance;
-                        params["humanPositionX"] = sensorData.pos_x;
-                        params["humanPositionY"] = sensorData.pos_y;
-                        params["humanPositionZ"] = sensorData.pos_z;
-                        params["timestamp"] = currentTime;
+                        // 有人存在时的完整数据
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_PRESENCE, sensorData.presence);
+                        BleProto::appendTlvU16(frame.data, BleProto::TLV_HEART_RATE_X10, 
+                                             static_cast<uint16_t>(sensorData.heart_rate * 10.0f + 0.5f));
+                        BleProto::appendTlvU16(frame.data, BleProto::TLV_BREATH_RATE_X10, 
+                                             static_cast<uint16_t>(sensorData.breath_rate * 10.0f + 0.5f));
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_MOTION, sensorData.motion);
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_SLEEP_STATE, sensorData.sleep_state);
+                        BleProto::appendTlvU16(frame.data, BleProto::TLV_DISTANCE_CM, sensorData.distance);
+                        BleProto::appendTlvI16(frame.data, BleProto::TLV_POS_X_MM, sensorData.pos_x);
+                        BleProto::appendTlvI16(frame.data, BleProto::TLV_POS_Y_MM, sensorData.pos_y);
+                        BleProto::appendTlvI16(frame.data, BleProto::TLV_POS_Z_MM, sensorData.pos_z);
+                        
+                        // 暂时跳过波形数据，等待添加专用的TLV类型
+                        // TODO: 添加 TLV_HEART_WAVEFORM 和 TLV_BREATH_WAVEFORM 常量
                     } else {
-                        params["heartRate"] = 0.0;
-                        params["breathingRate"] = 0.0;
-                        params["heartbeatWaveform"] = 0;
-                        params["breathingWaveform"] = 0;
-                        params["personDetected"] = 0;
-                        params["humanActivity"] = 0;
-                        params["sleepState"] = 0;
-                        params["humanDistance"] = 0;
-                        params["timestamp"] = currentTime;
+                        // 无人时的基础数据
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_PRESENCE, 0);
+                        BleProto::appendTlvU16(frame.data, BleProto::TLV_HEART_RATE_X10, 0);
+                        BleProto::appendTlvU16(frame.data, BleProto::TLV_BREATH_RATE_X10, 0);
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_MOTION, 0);
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_SLEEP_STATE, 0);
+                        BleProto::appendTlvU16(frame.data, BleProto::TLV_DISTANCE_CM, 0);
                     }
                     
-                    // 序列化为JSON字符串
-                    String jsonStr;
-                    serializeJson(doc, jsonStr);
+                    // 发送TLV帧到雷达数据流特征
+                    sendFrameToBLE(frame, radarStreamCharacteristic);
 
-                    // 统一走 TLV 帧封装路径，不再裸切 JSON
-                    sendJSONDataToBLE(jsonStr);
-
+                    // 更新最后发送的数据
                     lastSentData.heart_rate = sensorData.heart_rate;
                     lastSentData.breath_rate = sensorData.breath_rate;
                     lastSentData.presence = sensorData.presence;
@@ -1443,66 +1497,32 @@ void uartProcessTask(void *parameter) {
 }
 
 /**
- * @brief 分块发送数据
- * 将大数据分块发送，避免BLE MTU限制
- * @param data 要发送的数据字符串
- */
-void sendDataInChunks(const String& data) {
-    if (xSemaphoreTake(bleSendMutex, portMAX_DELAY) != pdTRUE) {
-        return;
-    }
-
-    const int MAX_PACKET_SIZE = 20;
-    const int HEADER_SIZE = 6;
-    const int CHUNK_SIZE = MAX_PACKET_SIZE - HEADER_SIZE;
-
-    int totalLength = data.length();
-    int numChunks = (totalLength + CHUNK_SIZE - 1) / CHUNK_SIZE;
-
-    Serial.printf("[BLE发送] 分包数据 %d 字节, %d 包\n", totalLength, numChunks);
-
-    for(int i = 0; i < numChunks; i++) {
-        int start = i * CHUNK_SIZE;
-        int chunkLength = min(CHUNK_SIZE, totalLength - start);
-        String chunk = data.substring(start, start + chunkLength);
-
-        String packetHeader = String("[") + String(i+1) + String("/") + String(numChunks) + String("]");
-
-        int maxDataLength = MAX_PACKET_SIZE - packetHeader.length();
-        if (chunk.length() > maxDataLength) {
-            chunk = chunk.substring(0, maxDataLength);
-        }
-
-        String packet = packetHeader + chunk;
-
-        if (!deviceConnected) {
-            xSemaphoreGive(bleSendMutex);
-            return;
-        }
-
-        pCharacteristic->setValue(packet.c_str());
-        pCharacteristic->notify();
-
-        if (i < numChunks - 1) {
-            vTaskDelay(20 / portTICK_PERIOD_MS);
-        }
-    }
-
-    xSemaphoreGive(bleSendMutex);
-}
-
-/**
  * @brief 发送JSON数据到BLE（TLV帧封装）
  * 将JSON字符串通过 BleProto::encodeLegacyJsonToFrame 转换为TLV帧后分包发送。
  * 每包最大20字节，包间延迟10ms，使用互斥锁保证线程安全。
  * @param jsonData JSON格式数据字符串
  */
 void sendJSONDataToBLE(const String& jsonData) {
+    sendCommandResultToBLE(jsonData);
+}
+
+/**
+ * @brief 发送命令结果到BLE（走Device Result通道）
+ * 将JSON格式的命令响应通过BLE发送给客户端
+ * @param jsonData JSON格式数据字符串
+ */
+void sendCommandResultToBLE(const String& jsonData) {
     if (xSemaphoreTake(bleSendMutex, portMAX_DELAY) != pdTRUE) {
         return;
     }
 
     if (!deviceConnected) {
+        xSemaphoreGive(bleSendMutex);
+        return;
+    }
+
+    if (deviceResultCharacteristic == nullptr) {
+        Serial.println("[BLE] deviceResultCharacteristic未初始化");
         xSemaphoreGive(bleSendMutex);
         return;
     }
@@ -1516,22 +1536,115 @@ void sendJSONDataToBLE(const String& jsonData) {
 
     std::vector<uint8_t> raw = BleProto::encodeFrame(frame);
 
-    const size_t MAX_PACKET_SIZE = 20;
+    const size_t maxPacketSize = g_blePayloadSize > 0 ? g_blePayloadSize : FALLBACK_PAYLOAD;
     size_t offset = 0;
 
     while (offset < raw.size()) {
-        size_t chunkLen = min(MAX_PACKET_SIZE, raw.size() - offset);
-        pCharacteristic->setValue(raw.data() + offset, chunkLen);
-        pCharacteristic->notify();
+        size_t chunkLen = min(maxPacketSize, raw.size() - offset);
+        deviceResultCharacteristic->setValue(raw.data() + offset, chunkLen);
+        deviceResultCharacteristic->notify();
 
         offset += chunkLen;
         if (offset < raw.size()) {
-            vTaskDelay(10 / portTICK_PERIOD_MS);
+            vTaskDelay(2 / portTICK_PERIOD_MS);
         }
     }
 
-    Serial.printf("[BLE] 已发送TLV帧 CMD=0x%02X, 总长=%u\n",
-                  frame.cmd, static_cast<unsigned>(raw.size()));
+    Serial.printf("[BLE] 已发送命令结果帧 CMD=0x%02X, 总长=%u, 分包=%u\n",
+                  frame.cmd, 
+                  static_cast<unsigned>(raw.size()),
+                  static_cast<unsigned>(maxPacketSize));
+
+    xSemaphoreGive(bleSendMutex);
+}
+
+/**
+ * @brief 发送TLV帧到BLE（通用二进制帧发送器）
+ * 将TLV帧通过指定的BLE特征发送给客户端
+ * @param frame TLV帧对象
+ * @param pChar BLE特征指针
+ */
+void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar) {
+    if (xSemaphoreTake(bleSendMutex, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+
+    if (!deviceConnected || pChar == nullptr) {
+        xSemaphoreGive(bleSendMutex);
+        return;
+    }
+
+    std::vector<uint8_t> raw = BleProto::encodeFrame(frame);
+    const size_t maxPacketSize = g_blePayloadSize > 0 ? g_blePayloadSize : FALLBACK_PAYLOAD;
+    size_t offset = 0;
+
+    while (offset < raw.size()) {
+        size_t chunkLen = min(maxPacketSize, raw.size() - offset);
+        pChar->setValue(raw.data() + offset, chunkLen);
+        pChar->notify();
+
+        offset += chunkLen;
+        if (offset < raw.size()) {
+            vTaskDelay(2 / portTICK_PERIOD_MS);
+        }
+    }
+
+    Serial.printf("[BLE] 已发送TLV帧 CMD=0x%02X, 总长=%u, 分包=%u\n",
+                  frame.cmd, 
+                  static_cast<unsigned>(raw.size()),
+                  static_cast<unsigned>(maxPacketSize));
+
+    xSemaphoreGive(bleSendMutex);
+}
+
+/**
+ * @brief 发送雷达数据流到BLE（走Radar Stream通道）
+ * 将雷达实时数据通过BLE发送给客户端
+ * @param jsonData JSON格式数据字符串
+ */
+void sendRadarStreamToBLE(const String& jsonData) {
+    if (xSemaphoreTake(bleSendMutex, portMAX_DELAY) != pdTRUE) {
+        return;
+    }
+
+    if (!deviceConnected) {
+        xSemaphoreGive(bleSendMutex);
+        return;
+    }
+
+    if (radarStreamCharacteristic == nullptr) {
+        Serial.println("[BLE] radarStreamCharacteristic未初始化");
+        xSemaphoreGive(bleSendMutex);
+        return;
+    }
+
+    BleProto::Frame frame;
+    if (!BleProto::encodeLegacyJsonToFrame(jsonData, bleSequenceCounter++, frame)) {
+        Serial.printf("[BLE] JSON转TLV失败，原始数据: %s\n", jsonData.c_str());
+        xSemaphoreGive(bleSendMutex);
+        return;
+    }
+
+    std::vector<uint8_t> raw = BleProto::encodeFrame(frame);
+
+    const size_t maxPacketSize = g_blePayloadSize > 0 ? g_blePayloadSize : FALLBACK_PAYLOAD;
+    size_t offset = 0;
+
+    while (offset < raw.size()) {
+        size_t chunkLen = min(maxPacketSize, raw.size() - offset);
+        radarStreamCharacteristic->setValue(raw.data() + offset, chunkLen);
+        radarStreamCharacteristic->notify();
+
+        offset += chunkLen;
+        if (offset < raw.size()) {
+            vTaskDelay(2 / portTICK_PERIOD_MS);
+        }
+    }
+
+    Serial.printf("[BLE] 已发送雷达数据流 CMD=0x%02X, 总长=%u, 分包=%u\n",
+                  frame.cmd, 
+                  static_cast<unsigned>(raw.size()),
+                  static_cast<unsigned>(maxPacketSize));
 
     xSemaphoreGive(bleSendMutex);
 }
@@ -1553,14 +1666,6 @@ bool sendCustomJSONData(const String& jsonType, const String& jsonString) {
     sendJSONDataToBLE(fullJSON);
 
     return true;
-}
-
-/**
- * @brief 发送雷达数据到BLE
- * 发送雷达传感器数据（已移至FreeRTOS任务处理）
- */
-void sendRadarDataToBLE() {
-    Serial.println("ℹ️ 雷达数据发送已移至FreeRTOS任务处理");
 }
 
 /**
@@ -1597,8 +1702,9 @@ bool processQueryRadarData(JsonDocument& doc) {
                                String(",\"smallMoveRatio\":") + String(sensorData.small_move_ratio) +
                                String("}");
       
-            sendJSONDataToBLE(radarDataMsg);
-            Serial.println("已发送雷达数据");
+            // queryRadarData 是单次查询命令的响应，应该走 deviceResultCharacteristic
+            sendCommandResultToBLE(radarDataMsg);
+            Serial.println("已发送雷达数据查询响应");
             Serial.printf("发送的数据: %s\n", radarDataMsg.c_str());
         } else {
             Serial.println("BLE未连接，无法发送雷达数据");
@@ -1633,6 +1739,7 @@ bool processStartContinuousSend(JsonDocument& doc) {
                                String(continuousSendInterval) + "}";
 
             sendJSONDataToBLE(confirmMsg);
+            updateRadarStatus(); // 更新雷达状态特征
         }
         return true;
     }
@@ -1656,6 +1763,7 @@ bool processStopContinuousSend(JsonDocument& doc) {
             String confirmMsg = String("{\"type\":\"stopContinuousSendResult\",\"success\":true,\"message\":\"已停止持续发送模式\"}");
 
             sendJSONDataToBLE(confirmMsg);
+            updateRadarStatus(); // 更新雷达状态特征
         }
         return true;
     }
@@ -1749,6 +1857,7 @@ bool processSetDeviceId(JsonDocument& doc) {
       sendJSONDataToBLE(confirmMsg);
       
       sendStatusToBLE();
+      updateDeviceInfo(); // 设备ID变化后更新设备信息特征
     }
     return true;
   }
