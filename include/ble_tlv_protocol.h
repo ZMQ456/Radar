@@ -8,7 +8,7 @@
 namespace BleProto {
 
 static const uint8_t SOF1 = 0xAA;//帧头
-static const uint8_t SOF2 = 0x55;//
+static const uint8_t SOF2 = 0x55;//帧头
 static const uint8_t VERSION = 0x01;//协议版本
 
 // flags
@@ -208,14 +208,6 @@ bool readTlv(const std::vector<uint8_t>& data, size_t& offset, uint8_t& type, ui
 
 std::vector<uint8_t> encodeFrame(const Frame& frame);
 
-// ==================== 已废弃的JSON过渡层函数 ====================
-// 这些函数是从JSON到TLV过渡期间的兼容层，现在BLE模块已完全TLV化，可以安全移除
-
-// 入站：TLV -> 旧 JSON 命令（已废弃）
-bool decodeFrameToLegacyJson(const Frame& frame, String& legacyJson); // 已废弃：BLE模块已完全TLV化
-
-// 出站：旧 JSON 响应 -> TLV Frame（已废弃）
-bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame); // 已废弃：请直接构造TLV帧
 
 } // namespace BleProto
 

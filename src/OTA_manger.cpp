@@ -11,12 +11,12 @@ static OtaUpgradeTask currentOtaTask;// 当前OTA升级任务
  */
 static bool isAcceptedOtaCode(const JsonVariantConst& codeValue) {
     if (codeValue.is<int>()) {// 有些平台返回的code是整数，有些是字符串，这里兼容两种情况
-        int code = codeValue.as<int>();// 200表示有新版本，1000表示当前版本已是最新，无需升级
+        int code = codeValue.as<int>();//它需要通过 as<int>() 进行类型转换/提取，而不是直接使用 as<int>() 的结果进行比较，因为 as<int>() 返回的是一个临时对象，而不是一个直接的整数值。通过将其赋值给一个变量，我们可以确保在比较时使用的是一个稳定的整数值，而不是一个临时对象。这也是C++中常见的类型转换和比较的正确方式。
         return code == 200 || code == 1000;
     }
 
     String code = codeValue.as<String>();
-    return code == "200" || code == "1000";
+    return code == "200" || code == "1000";// 200表示有新版本，1000表示当前版本已是最新，无需升级
 }
 
 /**
@@ -92,7 +92,7 @@ void storeOtaTask(const OtaUpgradeTask& task) {
  */
 bool parseOtaUpgradeMessage(const String& payload, OtaUpgradeTask& task, String& errorMsg) {
     JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, payload);
+    DeserializationError error = deserializeJson(doc, payload);// 反序列化JSON字符串到JsonDocument对象中，如果失败则返回错误信息
     if (error) {
         errorMsg = "OTA message JSON parse failed";
         return false;

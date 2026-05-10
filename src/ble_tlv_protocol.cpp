@@ -202,49 +202,5 @@ static String bytesToString(const uint8_t* data, uint16_t len) {
         out += static_cast<char>(data[i]);
     }
     return out;
+  }
 }
-
-// ==================== 已废弃的JSON过渡层函数 ====================
-// 这些函数是从JSON到TLV过渡期间的兼容层，现在BLE模块已完全TLV化，可以安全移除
-
-static bool decodeCommandPayloadToJson(const Frame& frame, JsonDocument& doc) {
-    // 已废弃：BLE模块现在直接处理TLV帧，不再需要JSON转换
-    Serial.println("⚠️ [BLE] decodeCommandPayloadToJson已废弃，BLE模块已完全TLV化");
-    return false;
-}
-
-bool decodeFrameToLegacyJson(const Frame& frame, String& legacyJson) {
-    // 已废弃：BLE模块现在直接处理TLV帧，不再需要JSON转换
-    Serial.println("⚠️ [BLE] decodeFrameToLegacyJson已废弃，BLE模块已完全TLV化");
-    return false;
-}
-
-static WifiSecurityType securityStringToEnum(const String& securityStr) {
-    if (securityStr == "OPEN") return WIFI_SEC_OPEN;
-    if (securityStr == "WEP") return WIFI_SEC_WEP;
-    if (securityStr == "WPA" || securityStr == "WPA/WPA2") return WIFI_SEC_WPA;
-    if (securityStr == "WPA2" || securityStr == "WPA2-PSK") return WIFI_SEC_WPA2;
-    if (securityStr == "WPA3") return WIFI_SEC_WPA3;
-    return WIFI_SEC_UNKNOWN;
-}
-
-// 已废弃的辅助函数
-static void encodeWifiItems(JsonVariantConst networks, std::vector<uint8_t>& data) {
-    // 已废弃：WiFi网络列表现在直接在TLV发送函数中构造
-    Serial.println("⚠️ [BLE] encodeWifiItems已废弃，WiFi列表现在直接构造TLV");
-}
-
-static uint16_t toX10(float v) {
-    // 已废弃：数值转换现在直接在TLV构造时进行
-    if (v <= 0) return 0;
-    return static_cast<uint16_t>(v * 10.0f + 0.5f);
-}
-
-bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame) {
-    // 已废弃：BLE模块现在直接构造TLV帧，不再需要JSON到TLV的转换
-    Serial.println("⚠️ [BLE] encodeLegacyJsonToFrame已废弃，请直接构造TLV帧");
-    Serial.printf("⚠️ [BLE] 废弃调用数据: %s\n", json.c_str());
-    return false;
-}
-
-} // namespace BleProto

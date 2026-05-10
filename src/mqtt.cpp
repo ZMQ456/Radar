@@ -152,11 +152,12 @@ String getOtaResultInformTopic() {
 }
 
 /**
- * @brief Generate next MQTT message ID
- * Returns incrementing ID for message tracking and request-response matching
+ * @brief 生成下一个MQTT消息ID
+ * MQTT消息ID是一个16位的整数，用于标识MQTT消息的唯一性
+ * 每次调用该函数都会返回一个新的消息ID，范围从1到65535，超过范围后会重新从1开始
  *
- * @return message ID string
- * @example "1" -> "2" -> "3" ...
+ * @return 下一个MQTT消息ID字符串
+ * @example "12345"
  */
 static String nextMqttMessageId() {
     return String(mqttMessageId++);
@@ -168,12 +169,12 @@ static String nextMqttMessageId() {
  * @param task OTA升级任务对象
  */
 static void savePendingOtaResult(const OtaUpgradeTask& task) {
-    Preferences otaPrefs;
-    otaPrefs.begin("ota_state", false);
-    otaPrefs.putBool("pending", true);
-    otaPrefs.putString("requestId", task.id);
-    otaPrefs.putString("version", task.version);
-    otaPrefs.putString("module", task.module);
+    Preferences otaPrefs;// 创建Preferences对象用于存储OTA状态
+    otaPrefs.begin("ota_state", false);// 打开命名空间
+    otaPrefs.putBool("pending", true);// 标记有待处理的OTA结果
+    otaPrefs.putString("requestId", task.id);// 保存OTA请求ID
+    otaPrefs.putString("version", task.version);// 保存OTA版本信息
+    otaPrefs.putString("module", task.module);// 保存OTA模块信息
     otaPrefs.end();
 }
 
@@ -182,8 +183,8 @@ static void savePendingOtaResult(const OtaUpgradeTask& task) {
  * 用于在OTA升级完成后清除记录
  */
 static void clearPendingOtaResult() {
-    Preferences otaPrefs;
-    otaPrefs.begin("ota_state", false);
+    Preferences otaPrefs;// 创建Preferences对象用于存储OTA状态
+    otaPrefs.begin("ota_state", false);// 打开命名空间
     otaPrefs.clear();
     otaPrefs.end();
 }
@@ -197,11 +198,11 @@ static void checkAndReportPendingOtaResult() {
         return;
     }
 
-    otaBootResultChecked = true;
+    otaBootResultChecked = true;// 标记已检查过OTA引导结果，避免重复检查
 
     Preferences otaPrefs;
     otaPrefs.begin("ota_state", true);
-    bool pending = otaPrefs.getBool("pending", false);
+    bool pending = otaPrefs.getBool("pending", false);// 检查是否有待处理的OTA结果
     String requestId = otaPrefs.getString("requestId", "");
     String version = otaPrefs.getString("version", "");
     String module = otaPrefs.getString("module", OTA_MODULE_NAME);
@@ -212,10 +213,10 @@ static void checkAndReportPendingOtaResult() {
     }
 
     if (version == APP_VERSION) {
-        publishOtaResultInform(APP_VERSION, module.c_str());
-        publishOtaProgress(requestId.c_str(), 100, "OTA upgrade successful", module.c_str());
+        publishOtaResultInform(APP_VERSION, module.c_str());// 上报OTA升级结果
+        publishOtaProgress(requestId.c_str(), 100, "OTA upgrade successful", module.c_str());// 上报OTA升级进度
     } else {
-        publishOtaProgress(requestId.c_str(), -4, "OTA result version mismatch after reboot", module.c_str());
+        publishOtaProgress(requestId.c_str(), -4, "OTA result version mismatch after reboot", module.c_str());// 上报OTA升级进度
     }
 
     clearPendingOtaResult();
@@ -240,15 +241,15 @@ static bool executeHttpsOtaTask() {
         return false;
     }
 
-    if (!task.url.startsWith("https://")) {
+    if (!task.url.startsWith("https://")) {// 目前仅支持HTTPS OTA升级，其他协议不受支持
         markOtaState(OTA_UNSUPPORTED_PROTOCOL);
         publishOtaProgress(task.id.c_str(), -2, "Only HTTPS OTA url is supported", task.module.c_str());
         otaExecutionRequested = false;
         return false;
     }
 
-    WiFiClientSecure client;
-    client.setInsecure();
+    WiFiClientSecure client;// 创建安全WiFi客户端用于HTTPS连接
+    client.setInsecure();// 设置客户端为不验证服务器证书，适用于测试环境，生产环境建议使用setCACert等方法验证服务器证书
 
     HTTPClient https;
     if (!https.begin(client, task.url)) {
@@ -311,7 +312,7 @@ static bool executeHttpsOtaTask() {
             continue;
         }
 
-        size_t written = Update.write(buffer, bytesRead);
+        size_t written = Update.write(buffer, bytesRead);// 将下载的数据写入OTA更新分区
         if (written != bytesRead) {
             Update.abort();
             https.end();
@@ -449,14 +450,15 @@ bool publishOtaResultInform(const char* version, const char* module) {
 
 /**
  * @brief 发布OTA进度信息
- * 向平台上报OTA升级进度或失败状�? *
+ * 向平台上报OTA升级进度或失败状态
  * @param requestId 请求ID
- * @param step 进度步骤�?4~-1表示失败�?表示成功�? * @param desc 描述信息
+ * @param step 进度步骤，-4~-1表示失败，0表示成功
+ * @param desc 描述信息
  * @param module 模块名称
  * @return true 发布成功，false 发布失败
  */
 bool publishOtaProgress(const char* requestId, int step, const char* desc, const char* module) {
-    checkMQTTStatus();
+    checkMQTTStatus();// 确保MQTT客户端已初始化
 
     if (!mqttClient.connected()) {
         Serial.println("[MQTT] 未连接，跳过OTA进度上报");
@@ -506,7 +508,7 @@ bool handleOtaUpgradeMessage(const char* topic, const String& payload) {
     String errorMsg;
     int errorStep = -1;
 
-    if (!parseOtaUpgradeMessage(payload, task, errorMsg)) {
+    if (!parseOtaUpgradeMessage(payload, task, errorMsg)) {// 解析OTA升级消息失败，可能是格式错误或缺少必要字段
         markOtaState(OTA_REJECTED);
         publishOtaProgress("", -1, errorMsg.c_str(), OTA_MODULE_NAME);
         return false;
@@ -608,7 +610,7 @@ static bool publishPropertyReport(JsonDocument& params, const char* reportType) 
  * - 末尾添加 _reply
  *
  * @param requestTopic 请求主题
- * @return 回复主题字符�? * @example "/sys/.../c/service/property/set" -> "/sys/.../s/service/property/set_reply"
+ * @return 回复主题字符 * @example "/sys/.../c/service/property/set" -> "/sys/.../s/service/property/set_reply"
  */
 String buildReplyTopic(const char* requestTopic) {
     String topic = String(requestTopic);
@@ -658,7 +660,7 @@ bool publishMqttReply(const char* requestTopic,
 /**
  * @brief MQTT消息回调函数
  * 处理平台下发的指令，支持属性设置、属性读取和自定义服务 *
- * 支持的method�? * - thing.service.property.set: 设置设备属性（如continuousSendEnabled、continuousSendInterval�? * - thing.service.property.get: 读取设备属性（返回当前传感器数据和配置�? * - thing.service.*: 自定义服务（预留扩展�? *
+ * 支持的method* - thing.service.property.set: 设置设备属性（如continuousSendEnabled、continuousSendInterval? * - thing.service.property.get: 读取设备属性（返回当前传感器数据和配置? * - thing.service.*: 自定义服务（预留扩展? *
  * @param topic 消息主题
  * @param payload 消息载荷
  * @param length 载荷长度
@@ -674,11 +676,11 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
 
     // 先判断是否是OTA升级主题
     String topicStr = String(topic);
-    String otaUpgradeTopic = getOtaUpgradeTopic();
+    String otaUpgradeTopic = getOtaUpgradeTopic();// 获取OTA升级主题字符串
     
     if (topicStr == otaUpgradeTopic) {
         Serial.println("[MQTT] 处理OTA升级消息");
-        handleOtaUpgradeMessage(topic, message);
+        handleOtaUpgradeMessage(topic, message);// 处理OTA升级消息后直接返回，不再继续处理为属性设置或读取
         return;
     }
 
@@ -1036,7 +1038,7 @@ void mqttTask(void *parameter) {
                 checkAndReportPendingOtaResult();
 
                 if (otaExecutionRequested && hasExecutableOtaTask()) {
-                    executeHttpsOtaTask();
+                    executeHttpsOtaTask();// 执行OTA升级任务，连接MQTT服务器下载固件
                     vTaskDelay(50 / portTICK_PERIOD_MS);
                     continue;
                 }
