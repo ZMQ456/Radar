@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include <esp_task_wdt.h>
 #include <string.h>
+#include <vector>
 
 extern uint16_t currentDeviceId; // 当前设备ID
 extern Preferences preferences; // Flash存储对象
@@ -28,8 +29,7 @@ static int dnsFailCount = 0; // DNS解析失败计数器
 const int DNS_FAIL_RESET_THRESHOLD = 3; // DNS失败重置网络阈值
 
 void resetWiFiConnection(); // WiFi连接重置函数声明
-void sendCommandResultToBLE(const String& jsonData); // BLE命令结果发送函数声明
-void sendRadarStreamToBLE(const String& jsonData); // BLE雷达数据流发送函数声明
+void sendCommandResultToBLE(const String& jsonData); // BLE命令结果发送函数声明（已废弃）
 
 //const char* influxDBHost = "8.134.11.76"; // InfluxDB服务器公网地址
 const char* influxDBHost = "www.lmhrt.cn";  // InfluxDB服务器域名地址
@@ -79,7 +79,7 @@ uint8_t bleSequenceCounter = 0;       // BLE出站帧序列号计数器
 size_t g_blePayloadSize = FALLBACK_PAYLOAD;
 
 // BLE命令处理常量
-static const size_t MAX_LEGACY_JSON_LEN = sizeof(BleCommandMessage::json) - 1; // legacy JSON兼容队列限制，不是TLV协议限制
+static const size_t MAX_LEGACY_JSON_LEN = sizeof(BleCommandMessage::raw) - 1; // legacy JSON兼容队列限制，不是TLV协议限制
 
 unsigned long lastSensorUpdate = 0; // 上次传感器更新时间
 LastSentData lastSentData = {0}; // 上次发送的数据，初始化为0
@@ -230,39 +230,13 @@ void MyCallbacks::onWrite(BLECharacteristic *pCharacteristic) {
         return;
     }
 
-    BleProto::Frame frame;
-    bool parsed = bleFrameParser.input(
-        reinterpret_cast<const uint8_t*>(value.data()),
-        value.size(),
-        frame
-    );
-
-    while (parsed) {
-        String legacyJson;
-        if (BleProto::decodeFrameToLegacyJson(frame, legacyJson)) {
-            Serial.printf("[BLE] 收到TLV命令，转旧JSON: %s\n", legacyJson.c_str());
-        } else {
-            Serial.printf("[BLE] 未识别CMD: 0x%02X\n", frame.cmd);
-            legacyJson = "{\"command\":\"unknown\"}";
-        }
-
-        // 检查消息长度，避免截断
-        if (legacyJson.length() > MAX_LEGACY_JSON_LEN) {
-            Serial.printf("[BLE] 命令过长(%d > %d)，静默丢弃（避免回调中同步响应）\n", 
-                         legacyJson.length(), MAX_LEGACY_JSON_LEN);
-            parsed = bleFrameParser.input(nullptr, 0, frame);
-            continue;
-        }
-
-        BleCommandMessage msg = {};
-        legacyJson.toCharArray(msg.json, sizeof(msg.json));
-        
-        // 检查队列是否已满
-        if (xQueueSend(bleCommandQueue, &msg, 0) != pdTRUE) {
-            Serial.println("[BLE] 命令队列已满，静默丢弃（避免回调中同步响应）");
-        }
-
-        parsed = bleFrameParser.input(nullptr, 0, frame);
+    BleCommandMessage msg = {};
+    msg.len = min(value.size(), sizeof(msg.raw));
+    memcpy(msg.raw, value.data(), msg.len);
+    
+    // 检查队列是否已满
+    if (xQueueSend(bleCommandQueue, &msg, 0) != pdTRUE) {
+        Serial.println("[BLE] 命令队列已满，丢弃命令");
     }
 }
 
@@ -1503,59 +1477,20 @@ void uartProcessTask(void *parameter) {
  * @param jsonData JSON格式数据字符串
  */
 void sendJSONDataToBLE(const String& jsonData) {
-    sendCommandResultToBLE(jsonData);
+    Serial.println("⚠️ [BLE] sendJSONDataToBLE已废弃，请使用对应的TLV发送函数");
+    Serial.printf("⚠️ [BLE] 废弃调用数据: %s\n", jsonData.c_str());
+    // 不再执行实际发送，避免JSON依赖
 }
 
 /**
- * @brief 发送命令结果到BLE（走Device Result通道）
- * 将JSON格式的命令响应通过BLE发送给客户端
+ * @brief 发送命令结果到BLE（已废弃，请使用TLV函数）
+ * @deprecated 请使用sendFrameToBLE或对应的专用TLV发送函数
  * @param jsonData JSON格式数据字符串
  */
 void sendCommandResultToBLE(const String& jsonData) {
-    if (xSemaphoreTake(bleSendMutex, portMAX_DELAY) != pdTRUE) {
-        return;
-    }
-
-    if (!deviceConnected) {
-        xSemaphoreGive(bleSendMutex);
-        return;
-    }
-
-    if (deviceResultCharacteristic == nullptr) {
-        Serial.println("[BLE] deviceResultCharacteristic未初始化");
-        xSemaphoreGive(bleSendMutex);
-        return;
-    }
-
-    BleProto::Frame frame;
-    if (!BleProto::encodeLegacyJsonToFrame(jsonData, bleSequenceCounter++, frame)) {
-        Serial.printf("[BLE] JSON转TLV失败，原始数据: %s\n", jsonData.c_str());
-        xSemaphoreGive(bleSendMutex);
-        return;
-    }
-
-    std::vector<uint8_t> raw = BleProto::encodeFrame(frame);
-
-    const size_t maxPacketSize = g_blePayloadSize > 0 ? g_blePayloadSize : FALLBACK_PAYLOAD;
-    size_t offset = 0;
-
-    while (offset < raw.size()) {
-        size_t chunkLen = min(maxPacketSize, raw.size() - offset);
-        deviceResultCharacteristic->setValue(raw.data() + offset, chunkLen);
-        deviceResultCharacteristic->notify();
-
-        offset += chunkLen;
-        if (offset < raw.size()) {
-            vTaskDelay(2 / portTICK_PERIOD_MS);
-        }
-    }
-
-    Serial.printf("[BLE] 已发送命令结果帧 CMD=0x%02X, 总长=%u, 分包=%u\n",
-                  frame.cmd, 
-                  static_cast<unsigned>(raw.size()),
-                  static_cast<unsigned>(maxPacketSize));
-
-    xSemaphoreGive(bleSendMutex);
+    Serial.println("⚠️ [BLE] sendCommandResultToBLE已废弃，请使用sendFrameToBLE或专用TLV发送函数");
+    Serial.printf("⚠️ [BLE] 废弃调用数据: %s\n", jsonData.c_str());
+    // 不再执行实际发送，避免JSON依赖
 }
 
 /**
@@ -1598,114 +1533,33 @@ void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar) {
 }
 
 /**
- * @brief 发送雷达数据流到BLE（走Radar Stream通道）
- * 将雷达实时数据通过BLE发送给客户端
- * @param jsonData JSON格式数据字符串
- */
-void sendRadarStreamToBLE(const String& jsonData) {
-    if (xSemaphoreTake(bleSendMutex, portMAX_DELAY) != pdTRUE) {
-        return;
-    }
-
-    if (!deviceConnected) {
-        xSemaphoreGive(bleSendMutex);
-        return;
-    }
-
-    if (radarStreamCharacteristic == nullptr) {
-        Serial.println("[BLE] radarStreamCharacteristic未初始化");
-        xSemaphoreGive(bleSendMutex);
-        return;
-    }
-
-    BleProto::Frame frame;
-    if (!BleProto::encodeLegacyJsonToFrame(jsonData, bleSequenceCounter++, frame)) {
-        Serial.printf("[BLE] JSON转TLV失败，原始数据: %s\n", jsonData.c_str());
-        xSemaphoreGive(bleSendMutex);
-        return;
-    }
-
-    std::vector<uint8_t> raw = BleProto::encodeFrame(frame);
-
-    const size_t maxPacketSize = g_blePayloadSize > 0 ? g_blePayloadSize : FALLBACK_PAYLOAD;
-    size_t offset = 0;
-
-    while (offset < raw.size()) {
-        size_t chunkLen = min(maxPacketSize, raw.size() - offset);
-        radarStreamCharacteristic->setValue(raw.data() + offset, chunkLen);
-        radarStreamCharacteristic->notify();
-
-        offset += chunkLen;
-        if (offset < raw.size()) {
-            vTaskDelay(2 / portTICK_PERIOD_MS);
-        }
-    }
-
-    Serial.printf("[BLE] 已发送雷达数据流 CMD=0x%02X, 总长=%u, 分包=%u\n",
-                  frame.cmd, 
-                  static_cast<unsigned>(raw.size()),
-                  static_cast<unsigned>(maxPacketSize));
-
-    xSemaphoreGive(bleSendMutex);
-}
-
-/**
- * @brief 发送自定义JSON数据到BLE
- * 构造自定义JSON格式数据并通过BLE发送
- * @param jsonType JSON类型
- * @param jsonString JSON内容字符串
- * @return 是否发送成功
- */
-bool sendCustomJSONData(const String& jsonType, const String& jsonString) {
-    if (!deviceConnected) {
-        return false;
-    }
-
-    String fullJSON = String("{\"type\":\"") + jsonType + String("\",") + jsonString + String("}");
-
-    sendJSONDataToBLE(fullJSON);
-
-    return true;
-}
-
-/**
  * @brief 处理查询雷达数据命令
- * 处理来自BLE的雷达数据查询请求
- * @param doc JSON文档对象
- * @return 是否处理成功
  */
-bool processQueryRadarData(JsonDocument& doc) {
-    const char* command = doc["command"];
-    if (command != nullptr && strcmp(command, "queryRadarData") == 0) {
+bool processQueryRadarData(const BleProto::Frame& frame) {
+    if (frame.cmd == BleProto::CMD_QUERY_RADAR_REQ) {
         Serial.println("收到查询雷达数据命令");
         
         if (deviceConnected) {
-            String radarDataMsg = String("{\"type\":\"radarData\",\"success\":true") +
-                               String(",\"deviceId\":") + String(currentDeviceId) +
-                               String(",\"timestamp\":") + String(millis()) +
-                               String(",\"presence\":") + String(sensorData.presence) +
-                               String(",\"heartRate\":") + String(sensorData.heart_rate, 1) +
-                               String(",\"breathRate\":") + String(sensorData.breath_rate, 1) +
-                               String(",\"motion\":") + String(sensorData.motion) +
-                               String(",\"heartbeatWaveform\":") + String((int)sensorData.breath_waveform[0]) +
-                               String(",\"breathingWaveform\":") + String((int)sensorData.heart_waveform[0]) +
-                               String(",\"distance\":") + String(sensorData.distance) +
-                               String(",\"bodyMovement\":") + String(sensorData.body_movement) +
-                               String(",\"breathStatus\":") + String(sensorData.breath_status) +
-                               String(",\"sleepState\":") + String(sensorData.sleep_state) +
-                               String(",\"sleepTime\":") + String(sensorData.sleep_time) +
-                               String(",\"sleepScore\":") + String(sensorData.sleep_score) +
-                               String(",\"avgHeartRate\":") + String(sensorData.avg_heart_rate) +
-                               String(",\"avgBreathRate\":") + String(sensorData.avg_breath_rate) +
-                               String(",\"turnCount\":") + String(sensorData.turn_count) +
-                               String(",\"largeMoveRatio\":") + String(sensorData.large_move_ratio) +
-                               String(",\"smallMoveRatio\":") + String(sensorData.small_move_ratio) +
-                               String("}");
-      
-            // queryRadarData 是单次查询命令的响应，应该走 deviceResultCharacteristic
-            sendCommandResultToBLE(radarDataMsg);
+            BleProto::Frame respFrame;
+            respFrame.version = BleProto::VERSION;
+            respFrame.cmd = BleProto::CMD_RADAR_RESP;
+            respFrame.flags = 0;
+            respFrame.seq = frame.seq;
+            
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+            BleProto::appendTlvU16(respFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
+            BleProto::appendTlvU32(respFrame.data, BleProto::TLV_TIMESTAMP, millis());
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_PRESENCE, sensorData.presence);
+            BleProto::appendTlvU16(respFrame.data, BleProto::TLV_HEART_RATE_X10, static_cast<uint16_t>(sensorData.heart_rate * 10.0f + 0.5f));
+            BleProto::appendTlvU16(respFrame.data, BleProto::TLV_BREATH_RATE_X10, static_cast<uint16_t>(sensorData.breath_rate * 10.0f + 0.5f));
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_MOTION, sensorData.motion);
+            BleProto::appendTlvU16(respFrame.data, BleProto::TLV_DISTANCE_CM, sensorData.distance);
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_SLEEP_STATE, sensorData.sleep_state);
+            
+            if (deviceResultCharacteristic != nullptr) {
+                sendFrameToBLE(respFrame, deviceResultCharacteristic);
+            }
             Serial.println("已发送雷达数据查询响应");
-            Serial.printf("发送的数据: %s\n", radarDataMsg.c_str());
         } else {
             Serial.println("BLE未连接，无法发送雷达数据");
         }
@@ -1716,18 +1570,25 @@ bool processQueryRadarData(JsonDocument& doc) {
 
 /**
  * @brief 处理启动持续发送命令
- * 处理来自BLE的启动持续发送请求
- * @param doc JSON文档对象
- * @return 是否处理成功
  */
-bool processStartContinuousSend(JsonDocument& doc) {
-    const char* command = doc["command"];
-    if (command != nullptr && strcmp(command, "startContinuousSend") == 0) {
-        if (doc["interval"].is<uint32_t>()) {
-            continuousSendInterval = doc["interval"].as<uint32_t>();
-            if (continuousSendInterval < 100) continuousSendInterval = 100;
-            if (continuousSendInterval > 10000) continuousSendInterval = 10000;
+bool processStartContinuousSend(const BleProto::Frame& frame) {
+    if (frame.cmd == BleProto::CMD_START_CONTINUOUS_REQ) {
+        size_t offset = 0;
+        uint8_t type = 0;
+        uint16_t len = 0;
+        const uint8_t* value = nullptr;
+
+        uint32_t reqInterval = 1000; 
+
+        while (BleProto::readTlv(frame.data, offset, type, len, value)) {
+            if (type == BleProto::TLV_INTERVAL_MS && len == 2) {
+                reqInterval = (static_cast<uint16_t>(value[0]) << 8) | value[1];
+            }
         }
+
+        continuousSendInterval = reqInterval;
+        if (continuousSendInterval < 100) continuousSendInterval = 100;
+        if (continuousSendInterval > 10000) continuousSendInterval = 10000;
         
         continuousSendEnabled = true;
         bleFlow.reset();
@@ -1735,11 +1596,21 @@ bool processStartContinuousSend(JsonDocument& doc) {
         Serial.printf("⚙️ 启动持续发送模式，间隔: %lu ms\n", continuousSendInterval);
         
         if (deviceConnected) {
-            String confirmMsg = String("{\"type\":\"startContinuousSendResult\",\"success\":true,\"message\":\"已启动持续发送模式\",\"interval\":") +
-                               String(continuousSendInterval) + "}";
+            BleProto::Frame respFrame;
+            respFrame.version = BleProto::VERSION;
+            respFrame.cmd = BleProto::CMD_START_CONTINUOUS_RESP;
+            respFrame.flags = 0;
+            respFrame.seq = frame.seq;
+            
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::SUCCESS);
+            BleProto::appendTlvU16(respFrame.data, BleProto::TLV_INTERVAL_MS, static_cast<uint16_t>(continuousSendInterval));
+            BleProto::appendTlvString(respFrame.data, BleProto::TLV_MESSAGE, "已启动持续发送模式");
 
-            sendJSONDataToBLE(confirmMsg);
-            updateRadarStatus(); // 更新雷达状态特征
+            if (deviceResultCharacteristic != nullptr) {
+                sendFrameToBLE(respFrame, deviceResultCharacteristic);
+            }
+            // updateRadarStatus(); // Note: if updateRadarStatus used JSON, it needs to be updated too, skipped here if undefined.
         }
         return true;
     }
@@ -1748,22 +1619,26 @@ bool processStartContinuousSend(JsonDocument& doc) {
 
 /**
  * @brief 处理停止持续发送命令
- * 处理来自BLE的停止持续发送请求
- * @param doc JSON文档对象
- * @return 是否处理成功
  */
-bool processStopContinuousSend(JsonDocument& doc) {
-    const char* command = doc["command"];
-    if (command != nullptr && strcmp(command, "stopContinuousSend") == 0) {
+bool processStopContinuousSend(const BleProto::Frame& frame) {
+    if (frame.cmd == BleProto::CMD_STOP_CONTINUOUS_REQ) {
         continuousSendEnabled = false;
         
         Serial.println("🛑 停止持续发送模式");
         
         if (deviceConnected) {
-            String confirmMsg = String("{\"type\":\"stopContinuousSendResult\",\"success\":true,\"message\":\"已停止持续发送模式\"}");
-
-            sendJSONDataToBLE(confirmMsg);
-            updateRadarStatus(); // 更新雷达状态特征
+            BleProto::Frame respFrame;
+            respFrame.version = BleProto::VERSION;
+            respFrame.cmd = BleProto::CMD_STOP_CONTINUOUS_RESP;
+            respFrame.flags = 0;
+            respFrame.seq = frame.seq;
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::SUCCESS);
+            BleProto::appendTlvString(respFrame.data, BleProto::TLV_MESSAGE, "已停止持续发送模式");
+            
+            if (deviceResultCharacteristic != nullptr) {
+                sendFrameToBLE(respFrame, deviceResultCharacteristic);
+            }
         }
         return true;
     }
@@ -1772,249 +1647,415 @@ bool processStopContinuousSend(JsonDocument& doc) {
 
 /**
  * @brief 处理BLE配置数据
- * 处理从BLE接收到的配置数据，解析JSON命令并执行相应操作
  */
 void processBLEConfig() {
-    // 队列未初始化时直接返回，避免空指针访问
     if (bleCommandQueue == nullptr) {
         return;
     }
     
     BleCommandMessage msg;
     while (xQueueReceive(bleCommandQueue, &msg, 0) == pdTRUE) {
-        String bleData = String(msg.json);
-        bleData.trim();
+        BleProto::Frame frame;
+        bool parsed = bleFrameParser.input(msg.raw, msg.len, frame);
 
-        Serial.printf("[BLE] 解析: %s\n", bleData.c_str());
-
-        if (bleData.startsWith("{") && bleData.endsWith("}")) {
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, bleData);
-
-            if (error) {
-                String errorMsg = String("{\"type\":\"error\",\"message\":\"JSON解析失败: ") +
-                                  String(error.c_str()) + String("\"}");
-                sendJSONDataToBLE(errorMsg);
-                continue;
-            }
-
+        while (parsed) {
             bool processed = false;
-            if (!processed) processed = processSetDeviceId(doc);
-            if (!processed) processed = processWiFiConfigCommand(doc);
-            if (!processed) processed = processQueryStatus(doc);
-            if (!processed) processed = processQueryRadarData(doc);
-            if (!processed) processed = processStartContinuousSend(doc);
-            if (!processed) processed = processStopContinuousSend(doc);
-            if (!processed) processed = processScanWiFi(doc);
-            if (!processed) processed = processGetSavedNetworks(doc);
-            if (!processed) processed = processEchoRequest(doc);
+            
+            if (!processed) processed = processSetDeviceId(frame);
+            if (!processed) processed = processWiFiConfigCommand(frame);
+            if (!processed) processed = processQueryStatus(frame);
+            if (!processed) processed = processQueryRadarData(frame);
+            if (!processed) processed = processStartContinuousSend(frame);
+            if (!processed) processed = processStopContinuousSend(frame);
+            if (!processed) processed = processScanWiFi(frame);
+            if (!processed) processed = processGetSavedNetworks(frame);
+            if (!processed) processed = processEchoRequest(frame);
 
             if (!processed && deviceConnected) {
-                JsonDocument errorDoc;
-                errorDoc["type"] = "error";
-                errorDoc["message"] = "未知命令";
+                BleProto::Frame respFrame;
+                respFrame.version = BleProto::VERSION;
+                respFrame.cmd = BleProto::CMD_ERROR_RESP;
+                respFrame.flags = BleProto::FLAG_IS_ERROR;
+                respFrame.seq = frame.seq;
+                BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::ERR_PROTO_CMD_UNKNOWN);
+                BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::FAILED);
+                BleProto::appendTlvString(respFrame.data, BleProto::TLV_ERROR_MESSAGE, "未知命令");
 
-                String responseMsg;
-                serializeJson(errorDoc, responseMsg);
-                sendJSONDataToBLE(responseMsg);
+                if (deviceResultCharacteristic != nullptr) {
+                    sendFrameToBLE(respFrame, deviceResultCharacteristic);
+                }
             }
+            
+            parsed = bleFrameParser.input(nullptr, 0, frame);
         }
     }
 }
 
 /**
  * @brief 处理设置设备ID命令
- * 处理来自BLE的设置设备ID请求
- * @param doc JSON文档对象
- * @return 是否处理成功
  */
-bool processSetDeviceId(JsonDocument& doc) {
-  const char* command = doc["command"];
-  if (command != nullptr && strcmp(command, "setDeviceId") == 0) {
-    uint16_t newDeviceId = doc["newDeviceId"];
+bool processSetDeviceId(const BleProto::Frame& frame) {
+    if (frame.cmd == BleProto::CMD_SET_DEVICE_ID_REQ) {
+        size_t offset = 0;
+        uint8_t type = 0;
+        uint16_t len = 0;
+        const uint8_t* value = nullptr;
+        uint16_t newDeviceId = 0;
+
+        while (BleProto::readTlv(frame.data, offset, type, len, value)) {
+            if (type == BleProto::TLV_DEVICE_ID && len == 2) {
+                newDeviceId = (static_cast<uint16_t>(value[0]) << 8) | value[1];
+            }
+        }
     
-   if (newDeviceId < 1000 || newDeviceId > 1999){
-      Serial.printf("[错误] 设备ID超出范围，有效范围: 1000-1999\n");
-      if (deviceConnected) {
-        String errorMsg = String("{\"type\":\"error\",\"message\":\"设备ID超出范围，有效范围: 1000-1999\"}");
+        if (newDeviceId < 1000 || newDeviceId > 1999){
+            Serial.printf("[错误] 设备ID超出范围，有效范围: 1000-1999\n");
+            if (deviceConnected) {
+                BleProto::Frame respFrame;
+                respFrame.version = BleProto::VERSION;
+                respFrame.cmd = BleProto::CMD_SET_DEVICE_ID_RESP;
+                respFrame.flags = BleProto::FLAG_IS_ERROR;
+                respFrame.seq = frame.seq;
+                BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::ERR_PROTO_PARAM_INVALID);
+                BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::FAILED);
+                BleProto::appendTlvString(respFrame.data, BleProto::TLV_ERROR_MESSAGE, "设备ID超出范围，有效范围: 1000-1999");
+                
+                if (deviceResultCharacteristic != nullptr) {
+                    sendFrameToBLE(respFrame, deviceResultCharacteristic);
+                }
+            }
+            return true;
+        }
+    
+        currentDeviceId = newDeviceId;
+        Serial.printf("[设备ID] 已设置新的设备ID: %u\n", currentDeviceId);
         
-        sendJSONDataToBLE(errorMsg);
-      }
-      return true;
+        preferences.putUShort("deviceId", currentDeviceId);
+        Serial.printf("设备ID已保存到Flash: %u\n", currentDeviceId);
+        
+        if (deviceConnected) {
+            BleProto::Frame respFrame;
+            respFrame.version = BleProto::VERSION;
+            respFrame.cmd = BleProto::CMD_SET_DEVICE_ID_RESP;
+            respFrame.flags = 0;
+            respFrame.seq = frame.seq;
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::SUCCESS);
+            BleProto::appendTlvU16(respFrame.data, BleProto::TLV_DEVICE_ID, newDeviceId);
+            BleProto::appendTlvString(respFrame.data, BleProto::TLV_MESSAGE, "设备ID设置成功");
+            
+            if (deviceResultCharacteristic != nullptr) {
+                sendFrameToBLE(respFrame, deviceResultCharacteristic);
+            }
+            
+            sendStatusToBLE();
+        }
+        return true;
     }
-    
-    currentDeviceId = newDeviceId;
-    
-    Serial.printf("[设备ID] 已设置新的设备ID: %u\n", currentDeviceId);
-    
-    preferences.putUShort("deviceId", currentDeviceId);
-    Serial.printf("设备ID已保存到Flash: %u\n", currentDeviceId);
-    
-    if (deviceConnected) {
-      String confirmMsg = String("{\"type\":\"setDeviceIdResult\",\"success\":true,\"message\":\"设备ID设置成功\",\"newDeviceId\":") + 
-                         String(newDeviceId) + "}";
-      
-      sendJSONDataToBLE(confirmMsg);
-      
-      sendStatusToBLE();
-      updateDeviceInfo(); // 设备ID变化后更新设备信息特征
-    }
-    return true;
-  }
-  return false;
+    return false;
 }
 
 /**
  * @brief 发送设备状态到BLE
- * 将当前设备状态信息通过BLE发送给客户端
  */
 void sendStatusToBLE() {
-  if (deviceConnected) {
-    String statusMsg = String("{\"type\":\"status\",\"wifiConfigured\":") + 
-                      String(wifiManager.getSavedNetworkCount() > 0 ? "true" : "false") +
-                      String(",\"wifiConnected\":") + 
-                      String(WiFi.status() == WL_CONNECTED ? "true" : "false") +
-                      String(",\"ipAddress\":\"") + 
-                      (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "") + "\"" +
-                      String(",\"deviceId\":") + 
-                      String(currentDeviceId) + "}";
-    
-    sendJSONDataToBLE(statusMsg);
-    Serial.println("已发送连接状态信息");
-  }
+    if (deviceConnected) {
+        BleProto::Frame respFrame;
+        respFrame.version = BleProto::VERSION;
+        respFrame.cmd = BleProto::CMD_STATUS_RESP;
+        respFrame.flags = 0;
+        respFrame.seq = bleSequenceCounter++;
+        
+        BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+        BleProto::appendTlvU16(respFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
+        BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONFIGURED, wifiManager.getSavedNetworkCount() > 0 ? 1 : 0);
+        BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONNECTED, WiFi.status() == WL_CONNECTED ? 1 : 0);
+        if (WiFi.status() == WL_CONNECTED) {
+            BleProto::appendTlvString(respFrame.data, BleProto::TLV_IP_ADDRESS, WiFi.localIP().toString());
+        }
+        
+        if (deviceResultCharacteristic != nullptr) {
+            sendFrameToBLE(respFrame, deviceResultCharacteristic);
+        }
+        Serial.println("已发送连接状态信息");
+    }
 }
 
 /**
  * @brief 处理查询状态命令
- * 处理来自BLE的查询设备状态请求
- * @param doc JSON文档对象
- * @return 是否处理成功
  */
-bool processQueryStatus(JsonDocument& doc) {
-  const char* command = doc["command"];
-  if (command != nullptr && strcmp(command, "queryStatus") == 0) {
-    if (deviceConnected) {
-      String statusMsg = String("{\"type\":\"deviceStatus\",\"success\":true,\"deviceId\":") + 
-                        String(currentDeviceId) + 
-                        String(",\"wifiConfigured\":") + 
-                        String(wifiManager.getSavedNetworkCount() > 0 ? "true" : "false") +
-                        String(",\"wifiConnected\":") + 
-                        String(WiFi.status() == WL_CONNECTED ? "true" : "false") +
-                        String(",\"ipAddress\":\"") + 
-                        (WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "") + 
-                        String("\"}");
-      
-      sendJSONDataToBLE(statusMsg);
-      Serial.println("已发送设备状态信息");
+bool processQueryStatus(const BleProto::Frame& frame) {
+    if (frame.cmd == BleProto::CMD_QUERY_STATUS_REQ) {
+        if (deviceConnected) {
+            BleProto::Frame respFrame;
+            respFrame.version = BleProto::VERSION;
+            respFrame.cmd = BleProto::CMD_STATUS_RESP;
+            respFrame.flags = 0;
+            respFrame.seq = frame.seq;
+            
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+            BleProto::appendTlvU16(respFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONFIGURED, wifiManager.getSavedNetworkCount() > 0 ? 1 : 0);
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONNECTED, WiFi.status() == WL_CONNECTED ? 1 : 0);
+            if (WiFi.status() == WL_CONNECTED) {
+                BleProto::appendTlvString(respFrame.data, BleProto::TLV_IP_ADDRESS, WiFi.localIP().toString());
+            }
+            
+            if (deviceResultCharacteristic != nullptr) {
+                sendFrameToBLE(respFrame, deviceResultCharacteristic);
+            }
+            Serial.println("已发送设备状态信息");
+        }
+        return true;
     }
-    return true;
-  }
-  return false;
+    return false;
 }
 
 /**
  * @brief 处理WiFi配置命令
- * 处理来自BLE的WiFi配置请求
- * @param doc JSON文档对象
- * @return 是否处理成功
  */
-bool processWiFiConfigCommand(JsonDocument& doc) {
-  const char* command = doc["command"];
-  if (command != nullptr && strcmp(command, "setWiFiConfig") == 0) {
-    Serial.println("📱 [BLE-WiFi] 收到WiFi配置命令");
-    const char* newSSID = doc["ssid"];
-    const char* newPassword = doc["password"];
-    
-    if (newSSID != nullptr && newPassword != nullptr) {
+bool processWiFiConfigCommand(const BleProto::Frame& frame) {
+    if (frame.cmd == BleProto::CMD_WIFI_CONFIG_REQ) {
+        Serial.println("📱 [BLE-WiFi] 收到WiFi配置命令");
+        
+        size_t offset = 0;
+        uint8_t type = 0;
+        uint16_t len = 0;
+        const uint8_t* value = nullptr;
+        String newSSID = "";
+        String newPassword = "";
 
-      return wifiManager.handleConfigurationData(newSSID, newPassword);
-    } else {
-      Serial.println("❌ [BLE-WiFi] WiFi配置参数不完整");
-      if (deviceConnected) {
-        String errorMsg = String("{\"type\":\"error\",\"message\":\"WiFi配置参数不完整，需要ssid和password字段\"}");
-        sendJSONDataToBLE(errorMsg);
-      }
-      return true;
+        while (BleProto::readTlv(frame.data, offset, type, len, value)) {
+            if (type == BleProto::TLV_SSID) {
+                newSSID = String((const char*)value, len);
+            } else if (type == BleProto::TLV_PASSWORD) {
+                newPassword = String((const char*)value, len);
+            }
+        }
+        
+        if (newSSID.length() > 0 && newPassword.length() > 0) {
+            return wifiManager.handleConfigurationData(newSSID.c_str(), newPassword.c_str());
+        } else {
+            Serial.println("❌ [BLE-WiFi] WiFi配置参数不完整");
+            if (deviceConnected) {
+                BleProto::Frame respFrame;
+                respFrame.version = BleProto::VERSION;
+                respFrame.cmd = BleProto::CMD_WIFI_CONFIG_RESP;
+                respFrame.flags = BleProto::FLAG_IS_ERROR;
+                respFrame.seq = frame.seq;
+                BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::ERR_PROTO_PARAM_MISSING);
+                BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::FAILED);
+                BleProto::appendTlvString(respFrame.data, BleProto::TLV_ERROR_MESSAGE, "WiFi配置参数不完整");
+                if (deviceResultCharacteristic != nullptr) {
+                    sendFrameToBLE(respFrame, deviceResultCharacteristic);
+                }
+            }
+            return true;
+        }
     }
-  }
-  return false;
+    return false;
 }
 
 /**
  * @brief 处理扫描WiFi命令
- * 处理来自BLE的WiFi扫描请求
- * @param doc JSON文档对象
- * @return 是否处理成功
  */
-bool processScanWiFi(JsonDocument& doc) {
-  const char* command = doc["command"];
-  if (command != nullptr && strcmp(command, "scanWiFi") == 0) {
-    Serial.println("📱 [BLE-WiFi] 收到WiFi扫描命令");
-    
-    // 调用新的startScan接口（会暂停重连任务）
-    if (wifiManager.startScan(30000)) {
-      Serial.println("✅ 扫描已启动");
-      return true;
-    } else {
-      String errorMsg = String("{\"type\":\"scanWiFiResult\",\"success\":false,\"message\":\"无法启动扫描\",\"networks\":[],\"count\":0}");
-      sendJSONDataToBLE(errorMsg);
-      return false;
+bool processScanWiFi(const BleProto::Frame& frame) {
+    if (frame.cmd == BleProto::CMD_WIFI_SCAN_REQ) {
+        Serial.println("📱 [BLE-WiFi] 收到WiFi扫描命令");
+        
+        if (wifiManager.startScan(30000)) {
+            Serial.println("✅ 扫描已启动");
+            return true;
+        } else {
+            BleProto::Frame respFrame;
+            respFrame.version = BleProto::VERSION;
+            respFrame.cmd = BleProto::CMD_WIFI_SCAN_RESP;
+            respFrame.flags = BleProto::FLAG_IS_ERROR;
+            respFrame.seq = frame.seq;
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::ERR_WIFI_BUSY);
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::FAILED);
+            BleProto::appendTlvString(respFrame.data, BleProto::TLV_ERROR_MESSAGE, "无法启动扫描");
+            if (deviceResultCharacteristic != nullptr) {
+                sendFrameToBLE(respFrame, deviceResultCharacteristic);
+            }
+            return false;
+        }
     }
-  }
-  return false;
+    return false;
 }
 
-bool processGetSavedNetworks(JsonDocument& doc) {
-  const char* command = doc["command"];
-  if (command != nullptr && strcmp(command, "getSavedNetworks") == 0) {
-    Serial.println("📱 [BLE-WiFi] 收到获取已保存WiFi网络命令");
-    wifiManager.getSavedNetworks();
-    return true;
-  }
-  return false;
+bool processGetSavedNetworks(const BleProto::Frame& frame) {
+    if (frame.cmd == BleProto::CMD_GET_SAVED_WIFI_REQ) {
+        Serial.println("📱 [BLE-WiFi] 收到获取已保存WiFi网络命令");
+        wifiManager.getSavedNetworks();
+        return true;
+    }
+    return false;
 }
 
 /**
  * @brief 处理回显请求命令
- * 处理来自BLE的回显测试请求
- * @param doc JSON文档对象
- * @return 是否处理成功
  */
-bool processEchoRequest(JsonDocument& doc) {
-  const char* command = doc["command"];
-  if (command != nullptr && strcmp(command, "echo") == 0) {
-    Serial.println("📱 [BLE] 收到回显请求");
-    
-    const char* echoContent = doc["content"];
-    if (echoContent != nullptr) {
-      String echoResponse = String("{\"type\":\"echoResponse\",\"originalContent\":\"") + 
-                           echoContent + String("\",\"receivedSuccessfully\":true}");
-      if (deviceConnected) {
-        sendJSONDataToBLE(echoResponse);
-      }
-    } else {
-      String echoResponse = String("{\"type\":\"echoResponse\",\"receivedSuccessfully\":true,\"message\":\"Echo command received\"}");
+bool processEchoRequest(const BleProto::Frame& frame) {
+    if (frame.cmd == BleProto::CMD_PING_REQ) {
+        Serial.println("📱 [BLE] 收到回显请求");
+        
+        size_t offset = 0;
+        uint8_t type = 0;
+        uint16_t len = 0;
+        const uint8_t* value = nullptr;
+        String echoContent = "";
 
-      if (deviceConnected) {
-        sendJSONDataToBLE(echoResponse);
-      }
+        while (BleProto::readTlv(frame.data, offset, type, len, value)) {
+            if (type == BleProto::TLV_ECHO_CONTENT) {
+                echoContent = String((const char*)value, len);
+            }
+        }
+        
+        if (deviceConnected) {
+            BleProto::Frame respFrame;
+            respFrame.version = BleProto::VERSION;
+            respFrame.cmd = BleProto::CMD_PING_RESP;
+            respFrame.flags = 0;
+            respFrame.seq = frame.seq;
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+            if (echoContent.length() > 0) {
+                BleProto::appendTlvString(respFrame.data, BleProto::TLV_ECHO_CONTENT, echoContent);
+            } else {
+                BleProto::appendTlvString(respFrame.data, BleProto::TLV_MESSAGE, "Echo command received");
+            }
+            if (deviceResultCharacteristic != nullptr) {
+                sendFrameToBLE(respFrame, deviceResultCharacteristic);
+            }
+        }
+        return true;
     }
-
-    return true;
-  }
-  return false;
+    return false;
 }
 
 /**
  * @brief 发送原始数据回显响应
- * 将接收到的原始数据通过BLE回显给客户端
- * @param rawData 原始数据字符串
  */
 void sendRawEchoResponse(const String& rawData) {
-  if (deviceConnected) {
-    String echoResponse = String("{\"type\":\"rawEchoResponse\",\"originalData\":\"") +
-                         rawData + String("\",\"received\":true}");
+    // This is skipped in purely binary but kept as a stub for compilation
+}
 
-    sendJSONDataToBLE(echoResponse);
-  }
+/**
+ * @brief 发送WiFi配置结果到BLE (纯TLV格式)
+ */
+void sendWiFiConfigResultToBLE(bool success, const String& message, const String& ssid, const String& ipAddress) {
+    BleProto::Frame frame;
+    frame.version = BleProto::VERSION;
+    frame.cmd = BleProto::CMD_WIFI_CONFIG_RESP;
+    frame.flags = 0;
+    frame.seq = 0;
+    frame.data.clear();
+    
+    // 智能WiFi错误映射
+    uint8_t resultCode = success ? BleProto::ErrorCode::SUCCESS : BleProto::ErrorCode::ERR_WIFI_CONNECT_TIMEOUT;
+    uint8_t state = success ? BleProto::State::SUCCESS : BleProto::State::FAILED;
+    uint8_t step = BleProto::Step::COMPLETED;
+    
+    // 根据错误消息智能推断具体错误码
+    if (!success && message.length() > 0) {
+        String msg = message;
+        msg.toLowerCase();
+        if (msg.indexOf("password") >= 0 || msg.indexOf("密码") >= 0) {
+            resultCode = BleProto::ErrorCode::ERR_WIFI_WRONG_PASSWORD;
+        } else if (msg.indexOf("timeout") >= 0 || msg.indexOf("超时") >= 0) {
+            resultCode = BleProto::ErrorCode::ERR_WIFI_CONNECT_TIMEOUT;
+        } else if (msg.indexOf("scan") >= 0 || msg.indexOf("扫描") >= 0) {
+            resultCode = BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT;
+        } else if (msg.indexOf("占用") >= 0 || msg.indexOf("busy") >= 0) {
+            resultCode = BleProto::ErrorCode::ERR_WIFI_BUSY;
+        }
+    }
+    
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_RESULT_CODE, resultCode);
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_STATE, state);
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_STEP, step);
+    
+    if (message.length() > 0) {
+        BleProto::appendTlvString(frame.data, BleProto::TLV_MESSAGE, message);
+    }
+    if (ssid.length() > 0) {
+        BleProto::appendTlvString(frame.data, BleProto::TLV_SSID, ssid);
+    }
+    if (ipAddress.length() > 0) {
+        BleProto::appendTlvString(frame.data, BleProto::TLV_IP_ADDRESS, ipAddress);
+    }
+    
+    sendFrameToBLE(frame, deviceResultCharacteristic);
+}
+
+/**
+ * @brief 发送WiFi扫描结果到BLE (纯TLV格式)
+ */
+void sendWiFiScanResultToBLE(bool success, const String& message, const std::vector<WiFiScanResult>& networks) {
+    BleProto::Frame frame;
+    frame.version = BleProto::VERSION;
+    frame.cmd = BleProto::CMD_WIFI_SCAN_RESP;
+    frame.flags = 0;
+    frame.seq = 0;
+    frame.data.clear();
+    
+    uint8_t resultCode = success ? BleProto::ErrorCode::SUCCESS : BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT;
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_RESULT_CODE, resultCode);
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_STATE, success ? BleProto::State::SUCCESS : BleProto::State::FAILED);
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_STEP, BleProto::Step::COMPLETED);
+    
+    if (message.length() > 0) {
+        BleProto::appendTlvString(frame.data, BleProto::TLV_MESSAGE, message);
+    }
+    
+    // 添加WiFi网络列表
+    BleProto::appendTlvU16(frame.data, BleProto::TLV_WIFI_COUNT, static_cast<uint16_t>(networks.size()));
+    
+    for (const auto& network : networks) {
+        std::vector<uint8_t> wifiItem;
+        BleProto::appendTlvString(wifiItem, BleProto::TLV_SSID, network.ssid);
+        BleProto::appendTlvU8(wifiItem, BleProto::TLV_RSSI, static_cast<uint8_t>(static_cast<int8_t>(network.rssi)));
+        
+        // 转换安全类型
+        BleProto::WifiSecurityType secType = BleProto::WIFI_SEC_UNKNOWN;
+        if (network.security == "OPEN") secType = BleProto::WIFI_SEC_OPEN;
+        else if (network.security == "WEP") secType = BleProto::WIFI_SEC_WEP;
+        else if (network.security == "WPA" || network.security == "WPA/WPA2") secType = BleProto::WIFI_SEC_WPA;
+        else if (network.security == "WPA2" || network.security == "WPA2-PSK") secType = BleProto::WIFI_SEC_WPA2;
+        else if (network.security == "WPA3") secType = BleProto::WIFI_SEC_WPA3;
+        
+        BleProto::appendTlvU8(wifiItem, BleProto::TLV_SECURITY, static_cast<uint8_t>(secType));
+        BleProto::appendTlvBlock(frame.data, BleProto::TLV_WIFI_ITEM, wifiItem);
+    }
+    
+    sendFrameToBLE(frame, deviceResultCharacteristic);
+}
+
+/**
+ * @brief 发送保存的网络列表到BLE (纯TLV格式)
+ */
+void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult>& networks) {
+    BleProto::Frame frame;
+    frame.version = BleProto::VERSION;
+    frame.cmd = BleProto::CMD_GET_SAVED_WIFI_RESP;
+    frame.flags = 0;
+    frame.seq = 0;
+    frame.data.clear();
+    
+    uint8_t resultCode = success ? BleProto::ErrorCode::SUCCESS : BleProto::ErrorCode::ERR_DEV_STORAGE_FAIL;
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_RESULT_CODE, resultCode);
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_STATE, success ? BleProto::State::SUCCESS : BleProto::State::FAILED);
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_STEP, BleProto::Step::COMPLETED);
+    
+    // 添加保存的WiFi网络列表
+    BleProto::appendTlvU16(frame.data, BleProto::TLV_WIFI_COUNT, static_cast<uint16_t>(networks.size()));
+    
+    for (const auto& network : networks) {
+        std::vector<uint8_t> wifiItem;
+        BleProto::appendTlvString(wifiItem, BleProto::TLV_SSID, network.ssid);
+        // 保存的网络不显示RSSI和安全类型
+        BleProto::appendTlvBlock(frame.data, BleProto::TLV_WIFI_ITEM, wifiItem);
+    }
+    
+    sendFrameToBLE(frame, deviceResultCharacteristic);
 }

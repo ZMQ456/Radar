@@ -1,9 +1,15 @@
 #include "wifi_manager.h"
+#include <vector>
 
 // 外部变量和函数声明
 extern bool deviceConnected;// 设备是否已连接到WiFi网络标志
-void sendJSONDataToBLE(const String& jsonData);// 发送JSON数据到BLE设备
+void sendJSONDataToBLE(const String& jsonData);// 发送JSON数据到BLE设备（legacy）
 void setNetworkStatus(NetworkStatus status);// 设置网络状态
+
+// 新增：WiFi专用TLV发送函数声明
+void sendWiFiConfigResultToBLE(bool success, const String& message, const String& ssid = "", const String& ipAddress = "");
+void sendWiFiScanResultToBLE(bool success, const String& message, const std::vector<WiFiScanResult>& networks = {});
+void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult>& networks = {});
 
 /**
  * @brief WiFi管理器构造函数
@@ -216,19 +222,9 @@ bool WiFiManager::connectToNetwork(const char* ssid, const char* password) {
         
         // 向蓝牙发送当前连接的WiFi配置信息
         if (deviceConnected) {
-            JsonDocument doc;
-            doc["type"] = "wifiConnected";
-            doc["success"] = true;
-            doc["ssid"] = ssid;
-            doc["password"] = password;
-            doc["ipAddress"] = WiFi.localIP().toString();
-            doc["rssi"] = WiFi.RSSI();
-            
-            String jsonStr;
-            serializeJson(doc, jsonStr);
-            sendJSONDataToBLE(jsonStr);
-            
-            Serial.printf("📱 [BLE] 发送WiFi连接信息: %s\n", jsonStr.c_str());
+            sendWiFiConfigResultToBLE(true, "WiFi连接成功", ssid, WiFi.localIP().toString());
+            Serial.printf("📱 [BLE] 发送WiFi连接成功信息: SSID=%s, IP=%s\n", 
+                         ssid, WiFi.localIP().toString().c_str());
         }
         
         return true;
@@ -239,17 +235,8 @@ bool WiFiManager::connectToNetwork(const char* ssid, const char* password) {
         
         // 向蓝牙发送连接失败信息
         if (deviceConnected) {
-            JsonDocument doc;
-            doc["type"] = "wifiConnected";
-            doc["success"] = false;
-            doc["ssid"] = ssid;
-            doc["message"] = "WiFi连接失败，请检查密码是否正确";
-            
-            String jsonStr;
-            serializeJson(doc, jsonStr);
-            sendJSONDataToBLE(jsonStr);
-            
-            Serial.printf("📱 [BLE] 发送WiFi连接失败信息: %s\n", jsonStr.c_str());
+            sendWiFiConfigResultToBLE(false, "WiFi连接失败，请检查密码是否正确", ssid);
+            Serial.printf("📱 [BLE] 发送WiFi连接失败信息: SSID=%s\n", ssid);
         }
         
         return false;
@@ -373,22 +360,20 @@ bool WiFiManager::scanAndMatchNetworks() {
     }
     
     if (deviceConnected) {
-        String wifiList = String("{\"type\":\"scanWiFiResult\",\"success\":true,\"source\":\"reconnect\",\"count\":") + String(n) + String(",\"networks\":[");
-        bool first = true;
+        // 构建WiFi网络列表
+        std::vector<WiFiScanResult> networks;
         for (int i = 0; i < n; ++i) {
             if (WiFi.RSSI(i) >= MIN_RSSI_THRESHOLD) {
-                if (!first) {
-                    wifiList += ",";
-                }
-                wifiList += String("{\"ssid\":\"") + WiFi.SSID(i) + String("\",\"rssi\":") + 
-                             String(WiFi.RSSI(i)) + String(",\"channel\":") + 
-                             String(WiFi.channel(i)) + String("}");
-                first = false;
+                WiFiScanResult network;
+                network.ssid = WiFi.SSID(i);
+                network.rssi = WiFi.RSSI(i);
+                network.security = "WPA2"; // 简化处理，实际可以通过WiFi.encryptionType(i)获取
+                networks.push_back(network);
             }
         }
-        wifiList += "]}";
-        Serial.printf("📱 [BLE] 发送重连扫描结果，共 %d 个网络\n", n);
-        sendJSONDataToBLE(wifiList);
+        
+        sendWiFiScanResultToBLE(true, "重连扫描完成", networks);
+        Serial.printf("📱 [BLE] 发送重连扫描结果，共 %d 个网络\n", static_cast<int>(networks.size()));
     }
     
     // 遍历已保存的网络，寻找匹配的网络
@@ -518,8 +503,7 @@ void WiFiManager::scanAndSendResults() {
     if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         Serial.println("⏸️ [scanAndSendResults] WiFi正在被其他操作占用，跳过扫描");
         if (deviceConnected) {
-            String errorMsg = String("{\"type\":\"scanWiFiResult\",\"success\":false,\"message\":\"WiFi正在被其他操作占用，请稍后再试\",\"networks\":[],\"count\":0}");
-            sendJSONDataToBLE(errorMsg);
+            sendWiFiScanResultToBLE(false, "WiFi正在被其他操作占用，请稍后再试", {});
         }
         return;
     }
@@ -535,8 +519,7 @@ void WiFiManager::scanAndSendResults() {
         if (isScanning) {
             Serial.println("⚠️ [WiFi] 等待超时，跳过本次扫描");
             if (deviceConnected) {
-                String errorMsg = String("{\"type\":\"scanWiFiResult\",\"success\":false,\"message\":\"等待扫描超时，请稍后再试\",\"networks\":[],\"count\":0}");
-                sendJSONDataToBLE(errorMsg);
+                sendWiFiScanResultToBLE(false, "等待扫描超时，请稍后再试", {});
             }
             xSemaphoreGive(wifiMutex);
             return;
@@ -584,70 +567,61 @@ void WiFiManager::scanAndSendResults() {
         Serial.println("❌ 未扫描到任何WiFi网络或扫描失败");
         isScanning = false;
         if (deviceConnected) {
-            String errorMsg = String("{\"type\":\"scanWiFiResult\",\"success\":false,\"message\":\"未扫描到任何WiFi网络或扫描失败\",\"networks\":[],\"count\":0}");
-            sendJSONDataToBLE(errorMsg);
+            sendWiFiScanResultToBLE(false, "未扫描到任何WiFi网络或扫描失败", {});
         }
         xSemaphoreGive(wifiMutex);
         return;
     }
     
-    // 构建WiFi网络列表的JSON数据
-    String wifiList = String("{\"type\":\"scanWiFiResult\",\"success\":true,\"count\":") + String(n) + String(",\"networks\":[");
-    
-    bool first = true;
+    // 构建WiFi网络列表
+    std::vector<WiFiScanResult> networks;
     for (int i = 0; i < n; ++i) {
         if (WiFi.RSSI(i) >= MIN_RSSI_THRESHOLD) {
-            if (!first) {
-                wifiList += ",";
-            }
-            wifiList += String("{\"ssid\":\"") + WiFi.SSID(i) + String("\",\"rssi\":") + 
-                         String(WiFi.RSSI(i)) + String(",\"channel\":") + 
-                         String(WiFi.channel(i)) + String(",\"encryption\":");
+            WiFiScanResult network;
+            network.ssid = WiFi.SSID(i);
+            network.rssi = WiFi.RSSI(i);
             
-            // 根据加密类型添加相应的描述
+            // 根据加密类型设置安全类型
             switch (WiFi.encryptionType(i)) {
                 case WIFI_AUTH_OPEN:
-                    wifiList += String("\"open\"");
+                    network.security = "OPEN";
                     break;
                 case WIFI_AUTH_WEP:
-                    wifiList += String("\"WEP\"");
+                    network.security = "WEP";
                     break;
                 case WIFI_AUTH_WPA_PSK:
-                    wifiList += String("\"WPA\"");
+                    network.security = "WPA";
                     break;
                 case WIFI_AUTH_WPA2_PSK:
-                    wifiList += String("\"WPA2\"");
+                    network.security = "WPA2";
                     break;
                 case WIFI_AUTH_WPA_WPA2_PSK:
-                    wifiList += String("\"WPA/WPA2\"");
+                    network.security = "WPA/WPA2";
                     break;
                 case WIFI_AUTH_WPA2_ENTERPRISE:
-                    wifiList += String("\"WPA2-EAP\"");
+                    network.security = "WPA2-EAP";
                     break;
                 case WIFI_AUTH_WPA3_PSK:
-                    wifiList += String("\"WPA3\"");
+                    network.security = "WPA3";
                     break;
                 case WIFI_AUTH_WPA2_WPA3_PSK:
-                    wifiList += String("\"WPA2/WPA3\"");
+                    network.security = "WPA2/WPA3";
                     break;
                 default:
-                    wifiList += String("\"unknown\"");
+                    network.security = "UNKNOWN";
                     break;
             }
-            wifiList += "}";
-            first = false;
+            networks.push_back(network);
         }
     }
     
-    wifiList += "]}";
-    
-    Serial.printf("✅ 发送WiFi扫描结果，包含 %d 个可用网络\n", first ? 0 : n);
+    Serial.printf("✅ 发送WiFi扫描结果，包含 %d 个可用网络\n", static_cast<int>(networks.size()));
     
     WiFi.scanDelete();
     isScanning = false;
     
     if (deviceConnected) {
-        sendJSONDataToBLE(wifiList);
+        sendWiFiScanResultToBLE(true, "扫描完成", networks);
     }
     
     xSemaphoreGive(wifiMutex);
@@ -665,8 +639,7 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
     if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         Serial.println("⏸️ [handleConfigurationData] WiFi正在被其他操作占用，跳过配网");
         if (deviceConnected) {
-            String errorMsg = String("{\"type\":\"wifiConfigResult\",\"success\":false,\"message\":\"WiFi正在被其他操作占用，请稍后再试\"}");
-            sendJSONDataToBLE(errorMsg);
+            sendWiFiConfigResultToBLE(false, "WiFi正在被其他操作占用，请稍后再试");
         }
         return false;
     }
@@ -734,8 +707,7 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
         if (isScanning) {
             Serial.println("⚠️ [WiFi] 等待超时");
             if (deviceConnected) {
-                String errorMsg = String("{\"type\":\"wifiConfigResult\",\"success\":false,\"message\":\"等待扫描超时，请稍后再试\"}");
-                sendJSONDataToBLE(errorMsg);
+                sendWiFiConfigResultToBLE(false, "等待扫描超时，请稍后再试");
             }
             manualConfigActive = false;
             xSemaphoreGive(wifiMutex);
@@ -786,8 +758,7 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
         currentState = WIFI_DISCONNECTED;
         
         if (deviceConnected) {
-            String resultMsg = String("{\"type\":\"wifiConfigResult\",\"success\":false,\"message\":\"未扫描到任何WiFi网络，请检查设备位置\"}");
-            sendJSONDataToBLE(resultMsg);
+            sendWiFiConfigResultToBLE(false, "未扫描到任何WiFi网络，请检查设备位置");
         }
         vTaskDelay(3000 / portTICK_PERIOD_MS);
         manualConfigActive = false;
@@ -819,11 +790,15 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
         String errorMsg;
         
         if (signalTooWeak) {
-            errorMsg = String("{\"type\":\"wifiConfigResult\",\"success\":false,\"message\":\"目标WiFi信号过弱，请将设备靠近路由器\"}");
             Serial.printf("❌ 目标WiFi信号过弱: %d dBm (阈值: %d dBm)\n", foundRssi, MIN_RSSI_THRESHOLD);
+            if (deviceConnected) {
+                sendWiFiConfigResultToBLE(false, "目标WiFi信号过弱，请将设备靠近路由器");
+            }
         } else {
-            errorMsg = String("{\"type\":\"wifiConfigResult\",\"success\":false,\"message\":\"未找到目标WiFi网络，请检查WiFi名称是否正确\"}");
             Serial.println("❌ 未找到目标WiFi网络");
+            if (deviceConnected) {
+                sendWiFiConfigResultToBLE(false, "未找到目标WiFi网络，请检查WiFi名称是否正确");
+            }
         }
         
         WiFi.scanDelete();
@@ -833,10 +808,6 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
         if (manualConfigActive) {
             manualConfigActive = false;
             Serial.println("🔧 [WiFi] 手动配置失败，WiFi重连机制已恢复");
-        }
-        
-        if (deviceConnected) {
-            sendJSONDataToBLE(errorMsg);
         }
         vTaskDelay(3000 / portTICK_PERIOD_MS);
         manualConfigActive = false;
@@ -855,8 +826,7 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
             Serial.println("✅ WiFi配置成功并已保存");
             
             if (deviceConnected) {
-                String resultMsg = String("{\"type\":\"wifiConfigResult\",\"success\":true,\"message\":\"WiFi配置成功\"}");
-                sendJSONDataToBLE(resultMsg);
+                sendWiFiConfigResultToBLE(true, "WiFi配置成功", ssid, WiFi.localIP().toString());
             }
             manualConfigActive = false;
             xSemaphoreGive(wifiMutex);
@@ -874,8 +844,7 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
     }
     
     if (deviceConnected) {
-        String resultMsg = String("{\"type\":\"wifiConfigResult\",\"success\":false,\"message\":\"WiFi配置失败，请检查密码是否正确\"}");
-        sendJSONDataToBLE(resultMsg);
+        sendWiFiConfigResultToBLE(false, "WiFi配置失败，请检查密码是否正确");
     }
     vTaskDelay(3000 / portTICK_PERIOD_MS);
     manualConfigActive = false;
@@ -1038,31 +1007,21 @@ int WiFiManager::getSavedNetworkCount() {
 void WiFiManager::getSavedNetworks() {
     Serial.printf("📋 [WiFi] 获取已保存的WiFi网络列表，共 %d 个\n", savedNetworkCount);
     
-    if (savedNetworkCount == 0) {
-        Serial.println("⚠️ 没有保存的WiFi网络");
-        if (deviceConnected) {
-            String responseMsg = String("{\"type\":\"savedNetworks\",\"success\":true,\"count\":0,\"networks\":[]}");
-            sendJSONDataToBLE(responseMsg);
-        }
-        return;
-    }
-    
-    String wifiList = String("{\"type\":\"savedNetworks\",\"success\":true,\"count\":") + String(savedNetworkCount) + String(",\"networks\":[");
-    
+    // 构建保存的网络列表
+    std::vector<WiFiScanResult> networks;
     for (int i = 0; i < savedNetworkCount; i++) {
-        if (i > 0) {
-            wifiList += ",";
-        }
-        wifiList += String("{\"ssid\":\"") + String(savedNetworks[i].ssid) + String("\"}");
+        WiFiScanResult network;
+        network.ssid = String(savedNetworks[i].ssid);
+        network.rssi = 0; // 保存的网络不显示RSSI
+        network.security = ""; // 保存的网络不显示安全类型
+        networks.push_back(network);
     }
-    
-    wifiList += "]}";
-    
-    Serial.printf("📤 [WiFi] 发送已保存的WiFi网络列表: %s\n", wifiList.c_str());
     
     if (deviceConnected) {
-        sendJSONDataToBLE(wifiList);
+        sendSavedNetworksResultToBLE(true, networks);
     }
+    
+    Serial.printf("📤 [WiFi] 发送已保存的WiFi网络列表，共 %d 个\n", static_cast<int>(networks.size()));
 }
 
 /**

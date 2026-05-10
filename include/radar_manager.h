@@ -13,8 +13,7 @@
 #include <freertos/queue.h>
 #include <Preferences.h>
 #include "ble_tlv_protocol.h"
-
-class WiFiManager;
+#include "wifi_manager.h"
 
 // Radar Data Service
 #define RADAR_DATA_SERVICE_UUID      "a8c1e5c0-3d5d-4a9d-8d5e-7c8b6a4e2f1a"
@@ -175,7 +174,8 @@ extern QueueHandle_t phaseDataQueue; // 相位数据队列
 extern QueueHandle_t vitalDataQueue; // 生命体征数据队列
 extern QueueHandle_t uartQueue; // UART数据队列
 typedef struct {
-    char json[256];
+    uint8_t raw[256];
+    size_t len;
 } BleCommandMessage;
 
 extern TaskHandle_t bleSendTaskHandle; // BLE发送任务句柄
@@ -231,23 +231,31 @@ void vitalSendTask(void *parameter);
 void radarDataTask(void *parameter);
 void uartProcessTask(void *parameter);
 
-void sendJSONDataToBLE(const String& jsonData);
-void sendCommandResultToBLE(const String& jsonData);
+// ==================== 已废弃的BLE JSON函数 ====================
+// 这些函数已被纯TLV函数替代，保留声明仅为兼容性，实际调用会输出警告
+
+void sendJSONDataToBLE(const String& jsonData); // 已废弃：请使用sendFrameToBLE或专用TLV发送函数
+void sendCommandResultToBLE(const String& jsonData); // 已废弃：请使用sendFrameToBLE或专用TLV发送函数
+
+// 新增：WiFi专用TLV发送函数
+void sendWiFiConfigResultToBLE(bool success, const String& message, const String& ssid = "", const String& ipAddress = "");
+void sendWiFiScanResultToBLE(bool success, const String& message, const std::vector<WiFiScanResult>& networks = {});
+void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult>& networks = {});
 void sendRadarStreamToBLE(const String& jsonData);
 void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar);
 bool sendCustomJSONData(const String& jsonType, const String& jsonString);
 
-bool processQueryRadarData(JsonDocument& doc);
-bool processStartContinuousSend(JsonDocument& doc);
-bool processStopContinuousSend(JsonDocument& doc);
+bool processQueryRadarData(const BleProto::Frame& frame);
+bool processStartContinuousSend(const BleProto::Frame& frame);
+bool processStopContinuousSend(const BleProto::Frame& frame);
 void processBLEConfig();
 
-bool processSetDeviceId(JsonDocument& doc);
-bool processQueryStatus(JsonDocument& doc);
-bool processWiFiConfigCommand(JsonDocument& doc);
-bool processScanWiFi(JsonDocument& doc);
-bool processGetSavedNetworks(JsonDocument& doc);
-bool processEchoRequest(JsonDocument& doc);
+bool processSetDeviceId(const BleProto::Frame& frame);
+bool processQueryStatus(const BleProto::Frame& frame);
+bool processWiFiConfigCommand(const BleProto::Frame& frame);
+bool processScanWiFi(const BleProto::Frame& frame);
+bool processGetSavedNetworks(const BleProto::Frame& frame);
+bool processEchoRequest(const BleProto::Frame& frame);
 void sendRawEchoResponse(const String& rawData);
 void sendStatusToBLE();
 

@@ -7,8 +7,8 @@
 
 namespace BleProto {
 
-static const uint8_t SOF1 = 0xAA;
-static const uint8_t SOF2 = 0x55;
+static const uint8_t SOF1 = 0xAA;//帧头
+static const uint8_t SOF2 = 0x55;//
 static const uint8_t VERSION = 0x01;//协议版本
 
 // flags
@@ -53,6 +53,10 @@ enum TlvType : uint8_t {
     TLV_ERROR_MESSAGE = 0x03,//错误信息
     TLV_TIMESTAMP = 0x04,//时间戳
     TLV_PROTOCOL_VERSION = 0x05,//协议版本
+    TLV_DEVICE_SN = 0x06,//设备序列号 uint64
+    TLV_FIRMWARE_VERSION = 0x07,//固件版本 string
+    TLV_DEVICE_TYPE = 0x08,//设备类型 string
+    TLV_MAC_ADDRESS = 0x09,//MAC地址 string
 
     TLV_HEART_RATE_X10 = 0x10,//心率（x10）
     TLV_BREATH_RATE_X10 = 0x11,//呼吸率（x10）
@@ -71,7 +75,9 @@ enum TlvType : uint8_t {
     TLV_RSSI = 0x24,//RSSI
     TLV_SECURITY = 0x25,//安全类型（uint8，见WifiSecurityType枚举）
 
+    TLV_CONTINUOUS_ENABLE = 0x30,//持续发送开关 uint8
     TLV_INTERVAL_MS = 0x31,//间隔时间（毫秒）
+    TLV_SENSOR_ACTIVE = 0x32,//传感器活跃状态 uint8
 
     TLV_MESSAGE = 0x40,//消息
     TLV_IP_ADDRESS = 0x41,//IP地址
@@ -186,6 +192,7 @@ void appendU8(std::vector<uint8_t>& out, uint8_t value);//添加8位无符号整
 void appendU16(std::vector<uint8_t>& out, uint16_t value);//添加16位无符号整数
 void appendI16(std::vector<uint8_t>& out, int16_t value);//添加16位有符号整数
 void appendU32(std::vector<uint8_t>& out, uint32_t value);//添加32位无符号整数
+void appendU64(std::vector<uint8_t>& out, uint64_t value);//添加64位无符号整数
 void appendBytes(std::vector<uint8_t>& out, const uint8_t* data, size_t len);//添加字节数组
 void appendString(std::vector<uint8_t>& out, const String& s);//添加字符串
 
@@ -193,6 +200,7 @@ void appendTlvU8(std::vector<uint8_t>& out, uint8_t type, uint8_t value);//添�
 void appendTlvU16(std::vector<uint8_t>& out, uint8_t type, uint16_t value);//添加16位无符号整数TLV
 void appendTlvI16(std::vector<uint8_t>& out, uint8_t type, int16_t value);//添加16位有符号整数TLV
 void appendTlvU32(std::vector<uint8_t>& out, uint8_t type, uint32_t value);//添加32位无符号整数TLV
+void appendTlvU64(std::vector<uint8_t>& out, uint8_t type, uint64_t value);//添加64位无符号整数TLV
 void appendTlvString(std::vector<uint8_t>& out, uint8_t type, const String& value);//添加字符串TLV
 void appendTlvBlock(std::vector<uint8_t>& out, uint8_t type, const std::vector<uint8_t>& value);//添加块TLV
 
@@ -200,11 +208,14 @@ bool readTlv(const std::vector<uint8_t>& data, size_t& offset, uint8_t& type, ui
 
 std::vector<uint8_t> encodeFrame(const Frame& frame);
 
-// 入站：TLV -> 旧 JSON 命令
-bool decodeFrameToLegacyJson(const Frame& frame, String& legacyJson);//将TLV帧解码为旧JSON命令
+// ==================== 已废弃的JSON过渡层函数 ====================
+// 这些函数是从JSON到TLV过渡期间的兼容层，现在BLE模块已完全TLV化，可以安全移除
 
-// 出站：旧 JSON 响应 -> TLV Frame
-bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame);//将旧JSON响应编码为TLV帧
+// 入站：TLV -> 旧 JSON 命令（已废弃）
+bool decodeFrameToLegacyJson(const Frame& frame, String& legacyJson); // 已废弃：BLE模块已完全TLV化
+
+// 出站：旧 JSON 响应 -> TLV Frame（已废弃）
+bool encodeLegacyJsonToFrame(const String& json, uint8_t seq, Frame& frame); // 已废弃：请直接构造TLV帧
 
 } // namespace BleProto
 

@@ -172,21 +172,35 @@ void updateDeviceInfo() {
         return;
     }
     
-    JsonDocument deviceInfoDoc;
-    deviceInfoDoc["deviceId"] = currentDeviceId;
-    deviceInfoDoc["protocolVersion"] = "1.0.0";
-    deviceInfoDoc["firmwareVersion"] = "2.1.0";
-    deviceInfoDoc["deviceType"] = "Radar";
-    deviceInfoDoc["macAddress"] = getDeviceMacAddress();
-    if (device_sn > 0) {
-        deviceInfoDoc["serialNumber"] = device_sn;
+    // 构造设备信息TLV帧
+    BleProto::Frame infoFrame;
+    infoFrame.version = BleProto::VERSION;
+    infoFrame.cmd = BleProto::CMD_STATUS_RESP;
+    infoFrame.flags = 0;
+    infoFrame.seq = 0;
+    infoFrame.data.clear();
+    
+    // 添加设备信息TLV字段
+    BleProto::appendTlvU8(infoFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+    BleProto::appendTlvU16(infoFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
+    BleProto::appendTlvString(infoFrame.data, BleProto::TLV_PROTOCOL_VERSION, "1.0.0");
+    BleProto::appendTlvString(infoFrame.data, BleProto::TLV_FIRMWARE_VERSION, "2.1.0");
+    BleProto::appendTlvString(infoFrame.data, BleProto::TLV_DEVICE_TYPE, "Radar");
+    
+    String macAddress = getDeviceMacAddress();
+    if (macAddress.length() > 0) {
+        BleProto::appendTlvString(infoFrame.data, BleProto::TLV_MAC_ADDRESS, macAddress);
     }
     
-    String deviceInfoJson;
-    serializeJson(deviceInfoDoc, deviceInfoJson);
-    deviceInfoCharacteristic->setValue(deviceInfoJson.c_str());
+    if (device_sn > 0) {
+        BleProto::appendTlvU64(infoFrame.data, BleProto::TLV_DEVICE_SN, device_sn);
+    }
     
-    Serial.printf("📋 [BLE] 设备信息已更新: %s\n", deviceInfoJson.c_str());
+    // 编码TLV帧并设置到特征
+    std::vector<uint8_t> frameData = BleProto::encodeFrame(infoFrame);
+    deviceInfoCharacteristic->setValue(frameData.data(), frameData.size());
+    
+    Serial.printf("📋 [BLE] 设备信息已更新为TLV格式，长度: %u 字节\n", static_cast<unsigned>(frameData.size()));
 }
 
 /**
@@ -198,20 +212,40 @@ void updateRadarStatus() {
         return;
     }
     
-    JsonDocument statusDoc;
-    statusDoc["continuousSendEnabled"] = continuousSendEnabled;
-    statusDoc["continuousSendInterval"] = continuousSendInterval;
-    statusDoc["presenceStable"] = sensorData.presence;
-    statusDoc["workingState"] = (millis() - lastSensorUpdate < SENSOR_TIMEOUT) ? "active" : "timeout";
-    statusDoc["lastUpdateTime"] = millis();
-    statusDoc["sensorConnected"] = (millis() - lastSensorUpdate < SENSOR_TIMEOUT);
+    // 构造雷达状态TLV帧
+    BleProto::Frame statusFrame;
+    statusFrame.version = BleProto::VERSION;
+    statusFrame.cmd = BleProto::CMD_STATUS_RESP;
+    statusFrame.flags = 0;
+    statusFrame.seq = 0;
+    statusFrame.data.clear();
     
-    String statusJson;
-    serializeJson(statusDoc, statusJson);
-    radarStatusCharacteristic->setValue(statusJson.c_str());
+    // 添加状态信息TLV字段
+    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_STATE, BleProto::State::SUCCESS);
+    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_STEP, BleProto::Step::COMPLETED);
+    
+    // 持续发送状态
+    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_CONTINUOUS_ENABLE, continuousSendEnabled ? 1 : 0);
+    BleProto::appendTlvU16(statusFrame.data, BleProto::TLV_INTERVAL_MS, static_cast<uint16_t>(continuousSendInterval));
+    
+    // 传感器状态
+    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_PRESENCE, sensorData.presence);
+    bool sensorActive = (millis() - lastSensorUpdate < SENSOR_TIMEOUT);
+    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_SENSOR_ACTIVE, sensorActive ? 1 : 0);
+    
+    // WiFi连接状态
+    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_WIFI_CONNECTED, WiFi.status() == WL_CONNECTED ? 1 : 0);
+    if (WiFi.status() == WL_CONNECTED) {
+        BleProto::appendTlvString(statusFrame.data, BleProto::TLV_IP_ADDRESS, WiFi.localIP().toString());
+    }
+    
+    // 编码TLV帧并设置到特征
+    std::vector<uint8_t> frameData = BleProto::encodeFrame(statusFrame);
+    radarStatusCharacteristic->setValue(frameData.data(), frameData.size());
     radarStatusCharacteristic->notify();
     
-    Serial.printf("📊 [BLE] 雷达状态已更新: %s\n", statusJson.c_str());
+    Serial.printf("📊 [BLE] 雷达状态已更新为TLV格式，长度: %u 字节\n", static_cast<unsigned>(frameData.size()));
 }
 
 /**
@@ -578,22 +612,30 @@ void bleConfigTask(void *parameter) {
         BLECharacteristic::PROPERTY_READ
     );
 
-    // 初始化设备信息特征 - 静态信息，连接后可读
-    JsonDocument deviceInfoDoc;
-    deviceInfoDoc["deviceId"] = currentDeviceId;
-    deviceInfoDoc["protocolVersion"] = "1.0.0";
-    deviceInfoDoc["firmwareVersion"] = "2.1.0";
-    deviceInfoDoc["deviceType"] = "Radar";
-    deviceInfoDoc["macAddress"] = getDeviceMacAddress();
+    // 初始化设备信息特征 - 纯TLV格式静态信息
+    BleProto::Frame deviceInfoFrame;
+    deviceInfoFrame.version = BleProto::VERSION;
+    deviceInfoFrame.cmd = BleProto::CMD_STATUS_RESP;  // 使用状态响应命令
+    deviceInfoFrame.flags = 0;
+    deviceInfoFrame.seq = 0;
+    deviceInfoFrame.data.clear();
+    
+    // 添加设备信息TLV字段
+    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_DEVICE_ID, String(currentDeviceId));
+    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_PROTOCOL_VERSION, "1.0.0");
+    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MESSAGE, "firmwareVersion:2.1.0");
+    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MESSAGE, "deviceType:Radar");
+    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MESSAGE, "macAddress:" + getDeviceMacAddress());
     if (device_sn > 0) {
-        deviceInfoDoc["serialNumber"] = device_sn;
+        BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MESSAGE, "serialNumber:" + String(device_sn));
     }
     
-    String deviceInfoJson;
-    serializeJson(deviceInfoDoc, deviceInfoJson);
-    deviceInfoCharacteristic->setValue(deviceInfoJson.c_str());
+    // 编码为二进制并设置特征值
+    std::vector<uint8_t> deviceInfoBinary = BleProto::encodeFrame(deviceInfoFrame);
+    deviceInfoCharacteristic->setValue(deviceInfoBinary.data(), deviceInfoBinary.size());
     
-    Serial.printf("📋 [BLE] 设备信息特征已初始化: %s\n", deviceInfoJson.c_str());
+    Serial.printf("📋 [BLE] 设备信息特征已初始化为TLV格式, 长度=%u字节\n", 
+                  static_cast<unsigned>(deviceInfoBinary.size()));
     
     refreshBLEAdvertisingData();//刷新BLE广播数据
     BLEDevice::startAdvertising();//启动BLE广播

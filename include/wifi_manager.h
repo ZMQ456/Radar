@@ -8,6 +8,14 @@
 #include <FreeRTOS.h>
 #include <semphr.h>
 #include <task.h>
+#include <vector>
+
+// WiFi扫描结果结构体
+struct WiFiScanResult {
+    String ssid;
+    int rssi;
+    String security;
+};
 
 /**
  * @brief 最大WiFi网络配置数量
