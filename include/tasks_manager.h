@@ -51,7 +51,7 @@ extern void sendStatusToBLE();
 extern void sendSleepDataToInfluxDB();
 extern void setNetworkStatus(NetworkStatus status);
 extern void clearStoredConfig();
-extern void loadDeviceId();
+extern void loadDeviceSN();
 extern void saveDeviceId();
 extern uint32_t generateDeviceHash();
 extern std::string buildBLEManufacturerData();
@@ -59,6 +59,9 @@ extern void refreshBLEAdvertisingData();
 extern String getDeviceMacAddress();
 extern void updateDeviceInfo();
 extern void updateRadarStatus();
+extern EmotionResult g_lastEmotionResult;
+extern bool g_hasEmotionResult;
+extern unsigned long g_lastEmotionUpdateMs;
 
 void initAllTasks();
 void WiFiEvent(WiFiEvent_t event);

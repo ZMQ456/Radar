@@ -1,6 +1,7 @@
 #include "mqtt.h"
 #include "wifi_manager.h"
 #include "radar_manager.h"
+#include "tasks_manager.h"
 #include "OTA_manager.h"
 #include "version.h"
 #include <HTTPClient.h>
@@ -16,7 +17,7 @@ extern String getDeviceMacAddress();// 获取设备MAC地址
 
 TaskHandle_t mqttTaskHandle = NULL;// MQTT任务句柄
 
-const char* mqttServer = "www.lmhrt.cn";// MQTT服务器地址
+const char* mqttServer = "8.138.160.177";// MQTT服务器地址
 const int mqttPort = 1883;// MQTT端口号
 const char* mqttDeviceModel = "radar_1.0";// 设备型号
 const char* mqttProductKey = "dEkr5BkkXTFZFBdR";// 产品标识
@@ -34,7 +35,7 @@ static bool otaBootResultChecked = false;// OTA引导结果检查
 unsigned long lastSleepDataTime = 0;// 最后一次发送睡眠数据时间
 const unsigned long SLEEP_DATA_INTERVAL = 10000;// 睡眠数据间隔
 unsigned long lastDailyDataTime = 0;// 最后一次发送每日数据时间
-const unsigned long DAILY_DATA_INTERVAL = 5000;// 每日数据间隔
+const unsigned long DAILY_DATA_INTERVAL = 2000;// 每日数据间隔
 unsigned long lastHeartbeatTime = 0;// 最后一次发送心跳时间
 const unsigned long HEARTBEAT_INTERVAL = 10000;  // 10秒心跳间隔
 
@@ -200,8 +201,8 @@ static void checkAndReportPendingOtaResult() {
 
     otaBootResultChecked = true;// 标记已检查过OTA引导结果，避免重复检查
 
-    Preferences otaPrefs;
-    otaPrefs.begin("ota_state", true);
+    Preferences otaPrefs;// 创建Preferences对象用于存储OTA状态
+    otaPrefs.begin("ota_state", true);// 打开命名空间，使用只读模式
     bool pending = otaPrefs.getBool("pending", false);// 检查是否有待处理的OTA结果
     String requestId = otaPrefs.getString("requestId", "");
     String version = otaPrefs.getString("version", "");
@@ -219,7 +220,7 @@ static void checkAndReportPendingOtaResult() {
         publishOtaProgress(requestId.c_str(), -4, "OTA result version mismatch after reboot", module.c_str());// 上报OTA升级进度
     }
 
-    clearPendingOtaResult();
+    clearPendingOtaResult();// 清除待处理OTA结果，避免重复上报
 }
 
 /**
@@ -232,18 +233,18 @@ static bool executeHttpsOtaTask() {
         return false;
     }
 
-    const OtaUpgradeTask& task = getCurrentOtaTask();
+    const OtaUpgradeTask& task = getCurrentOtaTask();// 获取当前OTA任务对象
 
     if (!WiFi.isConnected()) {
         markOtaState(OTA_FAILED);
-        publishOtaProgress(task.id.c_str(), -2, "WiFi is disconnected", task.module.c_str());
+        publishOtaProgress(task.id.c_str(), -2, "WiFi is disconnected", task.module.c_str());// 上报OTA升级进度，指示WiFi未连接导致OTA失败
         otaExecutionRequested = false;
         return false;
     }
 
     if (!task.url.startsWith("https://")) {// 目前仅支持HTTPS OTA升级，其他协议不受支持
         markOtaState(OTA_UNSUPPORTED_PROTOCOL);
-        publishOtaProgress(task.id.c_str(), -2, "Only HTTPS OTA url is supported", task.module.c_str());
+        publishOtaProgress(task.id.c_str(), -2, "Only HTTPS OTA url is supported", task.module.c_str());// 上报OTA升级进度，指示不支持的协议导致OTA失败
         otaExecutionRequested = false;
         return false;
     }
@@ -254,54 +255,54 @@ static bool executeHttpsOtaTask() {
     HTTPClient https;
     if (!https.begin(client, task.url)) {
         markOtaState(OTA_FAILED);
-        publishOtaProgress(task.id.c_str(), -2, "Failed to open OTA url", task.module.c_str());
+        publishOtaProgress(task.id.c_str(), -2, "Failed to open OTA url", task.module.c_str());// 上报OTA升级进度，指示打开OTA URL失败导致OTA失败
         otaExecutionRequested = false;
         return false;
     }
 
-    publishOtaProgress(task.id.c_str(), 5, "Starting HTTPS OTA download", task.module.c_str());
+    publishOtaProgress(task.id.c_str(), 5, "Starting HTTPS OTA download", task.module.c_str());// 上报OTA升级进度，指示开始下载OTA包
 
-    int httpCode = https.GET();
+    int httpCode = https.GET();// 发送HTTP GET请求下载OTA包
     if (httpCode != HTTP_CODE_OK) {
-        https.end();
+        https.end();// 结束HTTP连接
         markOtaState(OTA_FAILED);
-        publishOtaProgress(task.id.c_str(), -2, "HTTPS download request failed", task.module.c_str());
+        publishOtaProgress(task.id.c_str(), -2, "HTTPS download request failed", task.module.c_str());// 上报OTA升级进度，指示HTTPS下载请求失败导致OTA失败
         otaExecutionRequested = false;
         return false;
     }
 
-    int contentLength = https.getSize();
+    int contentLength = https.getSize();// 获取OTA包的内容长度，单位为字节，如果服务器没有返回Content-Length头部则默认为-1，表示未知长度
     if (contentLength > 0 && task.size > 0 && static_cast<uint32_t>(contentLength) != task.size) {
         https.end();
         markOtaState(OTA_FAILED);
-        publishOtaProgress(task.id.c_str(), -3, "Firmware size mismatch", task.module.c_str());
+        publishOtaProgress(task.id.c_str(), -3, "Firmware size mismatch", task.module.c_str());// 上报OTA升级进度，指示固件大小不匹配导致OTA失败
         otaExecutionRequested = false;
         return false;
     }
 
-    if (!Update.begin(task.size)) {
+    if (!Update.begin(task.size)) {// 初始化OTA更新，预分配足够的空间用于存储OTA包，如果初始化失败则无法继续OTA流程
         https.end();
-        markOtaState(OTA_FAILED);
-        publishOtaProgress(task.id.c_str(), -4, "Update.begin failed", task.module.c_str());
+        markOtaState(OTA_FAILED);// 标记OTA状态为失败
+        publishOtaProgress(task.id.c_str(), -4, "Update.begin failed", task.module.c_str());// 上报OTA升级进度，指示Update.begin失败导致OTA失败
         otaExecutionRequested = false;
         return false;
     }
 
-    if (!task.md5.isEmpty()) {
-        Update.setMD5(task.md5.c_str());
+    if (!task.md5.isEmpty()) {// 如果平台返回了OTA包的MD5校验值，则设置MD5校验，Update库会在写入过程中自动验证下载的OTA包的完整性和正确性
+        Update.setMD5(task.md5.c_str());// 如果平台返回了OTA包的MD5校验值，则设置MD5校验，Update库会在写入过程中自动验证下载的OTA包的完整性和正确性
     }
 
-    markOtaState(OTA_DOWNLOADING);
+    markOtaState(OTA_DOWNLOADING);// 标记OTA状态为正在下载
 
-    WiFiClient* stream = https.getStreamPtr();
-    uint8_t buffer[4096];
-    uint32_t writtenTotal = 0;
-    int lastReported = 5;
+    WiFiClient* stream = https.getStreamPtr();// 获取HTTP响应的流对象，用于读取下载的OTA包数据
+    uint8_t buffer[4096];// 创建一个缓冲区用于存储从HTTP流中读取的数据，大小为4KB，可以根据需要调整这个大小以平衡内存使用和下载效率
+    uint32_t writtenTotal = 0;// 记录已写入OTA包的总字节数，用于计算下载进度和验证下载的OTA包的大小是否正确
+    int lastReported = 5;// 记录上次上报的下载进度百分比，初始值为5，表示已经上报了开始下载的进度
 
     while (https.connected() && (contentLength > 0 ? writtenTotal < task.size : true)) {
-        size_t available = stream->available();
+        size_t available = stream->available();// 检查HTTP流中是否有可用的数据，如果没有数据可读则继续循环等待，保持MQTT连接活跃，避免在OTA下载过程中MQTT连接超时断开
         if (available == 0) {
-            mqttClient.loop();
+            mqttClient.loop();// 处理MQTT消息，保持MQTT连接活跃，避免在OTA下载过程中MQTT连接超时断开
             delay(1);
             continue;
         }
@@ -314,25 +315,25 @@ static bool executeHttpsOtaTask() {
 
         size_t written = Update.write(buffer, bytesRead);// 将下载的数据写入OTA更新分区
         if (written != bytesRead) {
-            Update.abort();
-            https.end();
+            Update.abort();// 如果写入失败，终止OTA更新流程，避免安装一个不完整或损坏的OTA包
+            https.end();// 结束HTTP连接
             markOtaState(OTA_FAILED);
-            publishOtaProgress(task.id.c_str(), -4, "Update.write failed", task.module.c_str());
+            publishOtaProgress(task.id.c_str(), -4, "Update.write failed", task.module.c_str());// 上报OTA升级进度，指示Update.write失败导致OTA失败
             otaExecutionRequested = false;
             return false;
         }
 
-        writtenTotal += written;
+        writtenTotal += written;// 更新已写入的总字节数
         esp_task_wdt_reset();
-        mqttClient.loop();
+        mqttClient.loop();// 处理MQTT消息，保持MQTT连接活跃，避免在OTA下载过程中MQTT连接超时断开
 
         if (task.size > 0) {
             int progress = static_cast<int>((writtenTotal * 90UL) / task.size);
             progress = progress < 5 ? 5 : progress;
             progress = progress > 95 ? 95 : progress;
-            if (progress >= lastReported + 5) {
-                lastReported = progress;
-                publishOtaProgress(task.id.c_str(), progress, "Downloading OTA package", task.module.c_str());
+            if (progress >= lastReported + 5) {// 每当下载进度增加5%时上报一次OTA升级进度，避免过于频繁的上报导致MQTT消息过多，同时也能及时反映下载的状态
+                lastReported = progress;// 更新上次上报的进度百分比
+                publishOtaProgress(task.id.c_str(), progress, "Downloading OTA package", task.module.c_str());// 上报OTA升级进度，指示正在下载OTA包，并包含当前的下载进度百分比和模块信息
             }
         }
 
@@ -341,11 +342,11 @@ static bool executeHttpsOtaTask() {
         }
     }
 
-    https.end();
-    markOtaState(OTA_VERIFYING);
+    https.end();// 结束HTTP连接
+    markOtaState(OTA_VERIFYING);// 标记OTA状态为正在验证
 
     if (task.size > 0 && writtenTotal != task.size) {
-        Update.abort();
+        Update.abort();// 如果下载完成后写入的总字节数与平台返回的OTA包大小不匹配，说明下载的OTA包不完整或损坏，终止OTA更新流程，避免安装一个不完整或损坏的OTA包
         markOtaState(OTA_FAILED);
         publishOtaProgress(task.id.c_str(), -3, "Firmware bytes received mismatch", task.module.c_str());
         otaExecutionRequested = false;
@@ -354,25 +355,25 @@ static bool executeHttpsOtaTask() {
 
     markOtaState(OTA_WRITING);
     if (!Update.end()) {
-        markOtaState(OTA_FAILED);
+        markOtaState(OTA_FAILED);// 如果结束OTA更新失败，说明写入过程中发生了错误，终止OTA更新流程，避免安装一个不完整或损坏的OTA包
         publishOtaProgress(task.id.c_str(), -4, "Update.end failed", task.module.c_str());
         otaExecutionRequested = false;
         return false;
     }
 
     if (!Update.isFinished()) {
-        markOtaState(OTA_FAILED);
+        markOtaState(OTA_FAILED);// 如果OTA更新没有成功完成，说明写入的OTA包不完整或损坏，终止OTA更新流程，避免安装一个不完整或损坏的OTA包
         publishOtaProgress(task.id.c_str(), -4, "OTA image is incomplete", task.module.c_str());
         otaExecutionRequested = false;
         return false;
     }
 
-    savePendingOtaResult(task);
+    savePendingOtaResult(task);// 保存待处理的OTA结果，记录当前OTA任务的状态和结果，以便在设备重启后检查并上报OTA升级结果
     markOtaState(OTA_PENDING_REBOOT);
-    publishOtaProgress(task.id.c_str(), 95, "OTA written successfully, rebooting", task.module.c_str());
+    publishOtaProgress(task.id.c_str(), 95, "OTA written successfully, rebooting", task.module.c_str());// 上报OTA升级进度，指示OTA包写入成功，即将重启设备，并包含当前的进度百分比和模块信息
     otaExecutionRequested = false;
     delay(500);
-    ESP.restart();
+    ESP.restart();// 重启设备以应用新的固件
     return true;
 }
 
@@ -437,7 +438,7 @@ bool publishOtaResultInform(const char* version, const char* module) {
     serializeJson(doc, jsonStr);
 
     String topic = getOtaResultInformTopic();
-    bool result = mqttClient.publish(topic.c_str(), jsonStr.c_str());
+    bool result = mqttClient.publish(topic.c_str(), jsonStr.c_str());// 发布MQTT消息，主题为OTA结果主题，内容为序列化后的JSON字符串
 
     if (result) {
         Serial.println("[MQTT] OTA结果信息上报成功");
@@ -468,18 +469,18 @@ bool publishOtaProgress(const char* requestId, int step, const char* desc, const
     JsonDocument doc;
     doc["id"] = requestId;
     
-    JsonObject params = doc["params"].to<JsonObject>();
+    JsonObject params = doc["params"].to<JsonObject>();// 提取params对象，包含OTA升级进度的具体信息，强转为JsonObject类型，方便后续访问各个字段
     params["step"] = String(step);
-    params["desc"] = desc;
-    if (module != nullptr && strlen(module) > 0) {
+    params["desc"] = desc;// 进度描述信息，通常由平台返回，描述当前OTA升级的状态或错误信息
+    if (module != nullptr && strlen(module) > 0) {// 模块信息是可选的，如果提供了模块信息则上报，否则不包含模块字段
         params["module"] = module;
     }
 
     String jsonStr;
-    serializeJson(doc, jsonStr);
+    serializeJson(doc, jsonStr);// 将JSON文档序列化为字符串，准备发送给MQTT服务器
 
     String topic = getOtaProgressTopic();
-    bool result = mqttClient.publish(topic.c_str(), jsonStr.c_str());
+    bool result = mqttClient.publish(topic.c_str(), jsonStr.c_str());// 发布MQTT消息，主题为OTA进度主题，内容为序列化后的JSON字符串
 
     if (result) {
         Serial.printf("[MQTT] OTA进度上报成功: step=%d, desc=%s\n", step, desc);
@@ -493,19 +494,19 @@ bool publishOtaProgress(const char* requestId, int step, const char* desc, const
 /**
  * @brief 处理OTA升级消息
  * 解析并处理平台下发的OTA升级指令
- *
+ *接收 MQTT 的 OTA 触发消息并统筹解析校验流程，包括消息格式校验、OTA任务合法性验证、状态更新和进度上报等
  * @param topic MQTT主题
  * @param payload 消息内容
  * @return true 处理成功，false 处理失败
  */
 bool handleOtaUpgradeMessage(const char* topic, const String& payload) {
-    (void)topic;
+    (void)topic;// 目前topic不区分不同OTA模块，后续如果有多个模块需要区分时可以根据topic解析出模块信息
     Serial.println("[MQTT] 收到OTA升级消息");
 
-    markOtaState(OTA_NOTIFIED);
+    markOtaState(OTA_NOTIFIED);// 标记已收到OTA升级通知
 
-    OtaUpgradeTask task;
-    String errorMsg;
+    OtaUpgradeTask task; // 创建OTA升级任务对象
+    String errorMsg;  // 错误消息字符串
     int errorStep = -1;
 
     if (!parseOtaUpgradeMessage(payload, task, errorMsg)) {// 解析OTA升级消息失败，可能是格式错误或缺少必要字段
@@ -514,23 +515,23 @@ bool handleOtaUpgradeMessage(const char* topic, const String& payload) {
         return false;
     }
 
-    storeOtaTask(task);
-    markOtaState(OTA_VALIDATING);
+    storeOtaTask(task);// 存储OTA任务信息，供后续执行时使用
+    markOtaState(OTA_VALIDATING);// 标记正在验证OTA任务合法性
 
-    if (!validateOtaUpgradeTask(task, errorMsg, errorStep)) {
+    if (!validateOtaUpgradeTask(task, errorMsg, errorStep)) {// 验证OTA升级任务合法性失败，可能是URL不合法、版本不兼容等问题
         if (errorStep == -2) {
-            markOtaState(OTA_UNSUPPORTED_PROTOCOL);
+            markOtaState(OTA_UNSUPPORTED_PROTOCOL);// 不支持的协议，例如非HTTPS URL
         } else {
-            markOtaState(OTA_REJECTED);
+            markOtaState(OTA_REJECTED);// 其他验证失败都标记为拒绝
         }
-        publishOtaProgress(task.id.c_str(), errorStep, errorMsg.c_str(), task.module.c_str());
+        publishOtaProgress(task.id.c_str(), errorStep, errorMsg.c_str(), task.module.c_str());// 上报OTA升级进度，包含错误信息
         return false;
     }
 
     // 到这里说任务是合法的
-    markOtaState(OTA_READY);
+    markOtaState(OTA_READY);// 标记OTA任务准备就绪
     otaExecutionRequested = true;
-    publishOtaProgress(task.id.c_str(), 1, "OTA task accepted, waiting for HTTPS download", task.module.c_str());
+    publishOtaProgress(task.id.c_str(), 1, "OTA task accepted, waiting for HTTPS download", task.module.c_str());// 上报OTA升级进度，表示任务已接受，等待执行
 
     return true;
 }
@@ -562,6 +563,33 @@ String makeMqttPassword(const String& clientId) {
     }
     md5str[32] = '\0';
     return String(md5str);
+}
+
+/**
+ * @brief 将情绪字段追加到 JSON 文档
+ * 有结果且未过期（5秒内）才追加，否则静默跳过
+ */
+static void appendEmotionFields(JsonDocument& doc) {
+    if (!g_hasEmotionResult || !g_lastEmotionResult.isValid) {
+        return;
+    }
+    // 超过 5 秒没更新，认为情绪结果过期
+    if (millis() - g_lastEmotionUpdateMs > 5000) {
+        return;
+    }
+    // 主次情绪（枚举值，前端用 EMOTION_NAMES 映射）
+    doc["primaryEmotion"]    = static_cast<int>(g_lastEmotionResult.primaryEmotion);
+    doc["secondaryEmotion"]  = static_cast<int>(g_lastEmotionResult.secondaryEmotion);
+    // 置信度和强度 0-1
+    doc["emotionConfidence"] = g_lastEmotionResult.confidence;
+    doc["emotionIntensity"]  = g_lastEmotionResult.intensity;
+    // 情绪维度：效价 -1~+1，唤醒度 0-1
+    doc["emotionValence"]    = g_lastEmotionResult.valence;
+    doc["emotionArousal"]    = g_lastEmotionResult.arousal;
+    // 压力评估 0-100
+    doc["stressLevel"]       = g_lastEmotionResult.stressLevel;
+    doc["anxietyLevel"]      = g_lastEmotionResult.anxietyLevel;
+    doc["relaxationLevel"]   = g_lastEmotionResult.relaxationLevel;
 }
 
 /**
@@ -727,6 +755,9 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
         replyData["continuousSendEnabled"] = continuousSendEnabled;
         replyData["continuousSendInterval"] = continuousSendInterval;
 
+        // 追加情绪字段
+        appendEmotionFields(replyData);
+
         if (publishMqttReply(topic, id, method, 0, replyData.as<JsonVariant>())) {
             Serial.println("[MQTT] property.get reply 发送成功");
         } else {
@@ -761,10 +792,10 @@ void mqttMessageCallback(char* topic, byte* payload, unsigned int length) {
  * 4. 注册下行消息回调函数
  */
 void initMQTT() {
-    deviceMacAddress = getDeviceMacAddress();
-    mqttClient.setServer(mqttServer, mqttPort);
-    mqttClient.setBufferSize(MQTT_MAX_PACKET_SIZE);
-    mqttClient.setCallback(mqttMessageCallback);
+    deviceMacAddress = getDeviceMacAddress();// 获取设备MAC地址，作为MQTT客户端ID的一部分
+    mqttClient.setServer(mqttServer, mqttPort);// 设置MQTT服务器地址和端口，准备连接MQTT服务
+    mqttClient.setBufferSize(MQTT_MAX_PACKET_SIZE);// 设置MQTT消息缓冲区大小，确保能够处理较大的消息载荷
+    mqttClient.setCallback(mqttMessageCallback);// 注册MQTT消息回调函数，当收到MQTT消息时会调用该函数进行处理
 
     Serial.printf("[MQTT] broker: %s:%d\n", mqttServer, mqttPort);
     Serial.printf("[MQTT] clientId: %s\n", getMqttClientId().c_str());
@@ -817,9 +848,10 @@ void reconnectMQTT() {
 }
 
 /**
- * @brief 检查MQTT连接状�? * 如果未连接则尝试重连，并保持心跳
+ * @brief 检查MQTT连接状态
+ * 如果未连接则尝试重连，并保持心跳
  *
- * 重连策略： * - 仅在WiFi已连接时尝试重连
+ * 重连策略：* - 仅在WiFi已连接时尝试重连
  * - 5秒尝试一次重连，避免频繁重连
  * - 调用mqttClient.loop()保持心跳和处理消息
  */
@@ -829,32 +861,22 @@ void checkMQTTStatus() {
         unsigned long now = millis();
         if (now - lastReconnectAttempt > 5000) {
             lastReconnectAttempt = now;
-            reconnectMQTT();
+            reconnectMQTT();// 尝试连接MQTT服务器，如果连接成功会订阅相关主题并上报版本信息，如果失败会在下一次检查时再次尝试连接
         }
     }
-    mqttClient.loop();
+    mqttClient.loop();// 处理MQTT消息，保持连接活跃，确保能够及时接收平台下发的指令和OTA升级消息
 }
 
 /**
- * @brief Send daily data to MQTT
- * Report real-time radar monitoring status data
- *
- * Reported fields:
- * - heartRate: heart rate
- * - breathingRate: breathing rate
- * - personDetected: human presence
- * - humanActivity: human activity
- * - humanDistance: human distance
- * - sleepState: sleep state
- * - humanPositionX/Y/Z: human coordinates
- * - heartbeatWaveform: heartbeat waveform
- * - breathingWaveform: breathing waveform
- * - abnormalState: abnormal state
- * - bedStatus: bed status
- * - struggleAlert: struggle alert
- * - noOneAlert: no one alert
- *
- * Trigger condition: called when data is available in mqttTask
+    * @brief 发送日常数据到MQTT
+    * 上报当前传感器数据和状态 * 上报字段： * - heartRate: 心率
+ * - breathingRate: 呼吸率
+ * - personDetected: 是否检测到人
+ * - humanActivity: 人体活动状态
+ * - humanDistance: 人体距离
+ * - sleepState: 睡眠状态
+ * - humanPositionX/Y/Z: 人体位置坐标
+ * - heartbeatWaveform: 心跳波形数据（示例中仅上报第
  */
 void sendDailyDataToMQTT() {
     if (WiFi.status() != WL_CONNECTED) {
@@ -898,6 +920,9 @@ void sendDailyDataToMQTT() {
     
     // Add WiFi IP address
     doc["wifiIP"] = WiFi.localIP().toString();
+
+    // 追加情绪字段（有有效结果且未过期时才追加）
+    appendEmotionFields(doc);
 
     if (publishPropertyReport(doc, "daily")) {
         Serial.println("[MQTT] daily data report published");
@@ -970,6 +995,9 @@ void sendSleepDataToMQTT() {
     doc["lightSleepDuration"] = sensorData.light_sleep_time;
     doc["deepSleepDuration"] = sensorData.deep_sleep_time;
 
+    // 追加情绪字段（睡眠期间的情绪状态）
+    appendEmotionFields(doc);
+
     if (publishPropertyReport(doc, "sleep")) {
         Serial.println("[MQTT] 睡眠数据上报成功");
     } else {
@@ -1008,6 +1036,9 @@ void sendHeartbeatToMQTT() {
     doc["noOneAlert"] = sensorData.no_one_alert;
     doc["wifiIP"] = WiFi.localIP().toString();
 
+    // 追加情绪字段（无人时 g_hasEmotionResult 为 false，不会实际发出，保持接口一致）
+    appendEmotionFields(doc);
+
     if (publishPropertyReport(doc, "heartbeat")) {
         Serial.println("[MQTT] heartbeat report published");
     } else {
@@ -1026,18 +1057,18 @@ void sendHeartbeatToMQTT() {
 void mqttTask(void *parameter) {
     Serial.println("📡 MQTT任务启动");
 
-    initMQTT();
+    initMQTT();// 初始化MQTT客户端配置
 
     while (1) {
         esp_task_wdt_reset();
 
         if (WiFi.status() == WL_CONNECTED) {
-            checkMQTTStatus();
+            checkMQTTStatus();// 检查MQTT连接状态，必要时重连，并处理MQTT消息回调
 
             if (mqttClient.connected()) {
-                checkAndReportPendingOtaResult();
+                checkAndReportPendingOtaResult();// 检查是否有待上报的OTA结果，如果有则上报给平台
 
-                if (otaExecutionRequested && hasExecutableOtaTask()) {
+                if (otaExecutionRequested && hasExecutableOtaTask()) {// 如果收到OTA升级指令且有合法的OTA任务准备就绪，则执行OTA升级任务
                     executeHttpsOtaTask();// 执行OTA升级任务，连接MQTT服务器下载固件
                     vTaskDelay(50 / portTICK_PERIOD_MS);
                     continue;

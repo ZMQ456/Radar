@@ -15,11 +15,11 @@
 
 class WiFiManager;
 
-extern uint64_t device_sn;
-extern Preferences preferences;
-extern WiFiManager wifiManager;
-extern bool continuousSendEnabled;
-extern unsigned long continuousSendInterval;
+extern uint64_t device_sn;//设备序列号
+extern Preferences preferences;//用于存储设备序列号等配置信息的Preferences对象
+extern WiFiManager wifiManager;//WiFi管理器对象
+extern bool continuousSendEnabled;//是否启用连续发送数据到MQTT的标志
+extern unsigned long continuousSendInterval;//连续发送数据到MQTT的时间间隔，单位为毫秒
 
 extern const char* mqttServer;
 extern const int mqttPort;

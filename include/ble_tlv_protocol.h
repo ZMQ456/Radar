@@ -3,7 +3,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <vector>
+#include <vector>//用于存储字节数据的动态数组
 
 namespace BleProto {
 
@@ -13,15 +13,18 @@ static const uint8_t VERSION = 0x01;//协议版本
 
 // flags
 static const uint8_t FLAG_FRAGMENT = 0x01;//是否为分片
-static const uint8_t FLAG_NEED_ACK = 0x02;//是否需要确认
-static const uint8_t FLAG_IS_ACK = 0x04;//是否为确认
+static const uint8_t FLAG_NEED_ACK = 0x02;//发送方说：这个包很重要，你收到了必须回我一个确认（ACK），否则我会一直重发
+static const uint8_t FLAG_IS_ACK = 0x04;//用于回复上面的 FLAG_NEED_ACK.它告诉对方:你刚才发给我的那个 seq 为 X 的包，我已经稳稳收到了
 static const uint8_t FLAG_IS_ERROR = 0x08;//是否为错误
 
-// cmd
+// ==================== 命令码定义 ====================
+// 范围分配：系统 0x01-0x0F | 雷达/传感器 0x10-0x1F | WiFi 0x20-0x2F | 设备 0x30-0x3F | 通用 0x7E-0x7F
 enum Command : uint8_t {
+    // --- 系统命令 ---
     CMD_PING_REQ = 0x01,//Ping请求
     CMD_PING_RESP = 0x02,//Ping响应
 
+    // --- 雷达/传感器命令 ---
     CMD_QUERY_STATUS_REQ = 0x10,//查询状态请求
     CMD_STATUS_RESP = 0x11,//状态响应
     CMD_QUERY_RADAR_REQ = 0x12,//查询雷达请求
@@ -32,6 +35,7 @@ enum Command : uint8_t {
     CMD_STOP_CONTINUOUS_RESP = 0x17,//停止连续响应
     CMD_CONTINUOUS_PUSH = 0x18,//连续推送
 
+    // --- WiFi 命令 ---
     CMD_WIFI_SCAN_REQ = 0x20,//WiFi扫描请求
     CMD_WIFI_SCAN_RESP = 0x21,//WiFi扫描响应
     CMD_WIFI_CONFIG_REQ = 0x22,//WiFi配置请求
@@ -39,15 +43,18 @@ enum Command : uint8_t {
     CMD_GET_SAVED_WIFI_REQ = 0x24,//获取保存的WiFi请求
     CMD_GET_SAVED_WIFI_RESP = 0x25,//获取保存的WiFi响应
 
+    // --- 设备配置命令 ---
     CMD_SET_DEVICE_ID_REQ = 0x30,//设置设备ID请求
     CMD_SET_DEVICE_ID_RESP = 0x31,//设置设备ID响应
 
+    // --- 通用命令 ---
     CMD_ERROR_RESP = 0x7E,//错误响应
     CMD_ACK = 0x7F//确认
 };
 
-// tlv type
+// ==================== TLV 类型码定义 ====================
 enum TlvType : uint8_t {
+    // --- 设备信息 (0x01-0x0F) ---
     TLV_DEVICE_ID = 0x01,//设备ID
     TLV_RESULT_CODE = 0x02,//结果码
     TLV_ERROR_MESSAGE = 0x03,//错误信息
@@ -58,6 +65,7 @@ enum TlvType : uint8_t {
     TLV_DEVICE_TYPE = 0x08,//设备类型 string
     TLV_MAC_ADDRESS = 0x09,//MAC地址 string
 
+    // --- 雷达/传感器数据 (0x10-0x1F) ---
     TLV_HEART_RATE_X10 = 0x10,//心率（x10）
     TLV_BREATH_RATE_X10 = 0x11,//呼吸率（x10）
     TLV_PRESENCE = 0x12,//存在
@@ -68,6 +76,7 @@ enum TlvType : uint8_t {
     TLV_POS_Y_MM = 0x17,//Y坐标（mm）
     TLV_POS_Z_MM = 0x18,//Z坐标（mm）
 
+    // --- WiFi 相关 (0x20-0x2F) ---
     TLV_SSID = 0x20,//SSID
     TLV_PASSWORD = 0x21,//密码
     TLV_WIFI_COUNT = 0x22,//WiFi数量
@@ -75,20 +84,24 @@ enum TlvType : uint8_t {
     TLV_RSSI = 0x24,//RSSI
     TLV_SECURITY = 0x25,//安全类型（uint8，见WifiSecurityType枚举）
 
+    // --- 控制参数 (0x30-0x3F) ---
     TLV_CONTINUOUS_ENABLE = 0x30,//持续发送开关 uint8
     TLV_INTERVAL_MS = 0x31,//间隔时间（毫秒）
     TLV_SENSOR_ACTIVE = 0x32,//传感器活跃状态 uint8
 
+    // --- 通用消息 (0x40-0x4F) ---
     TLV_MESSAGE = 0x40,//消息
     TLV_IP_ADDRESS = 0x41,//IP地址
     TLV_WIFI_CONFIGURED = 0x42,//WiFi配置
     TLV_WIFI_CONNECTED = 0x43,//WiFi连接
     TLV_ECHO_CONTENT = 0x44,//回显内容
-    
-    // 状态和步骤字段
     TLV_STATE = 0x45,//状态 uint8
     TLV_STEP = 0x46,//步骤 uint8
     TLV_REASON = 0x47,//原因码 uint8
+
+    // --- 波形数据 (0x60-0x6F) ---
+    TLV_HEART_WAVEFORM = 0x60,  // 心跳波形 uint8, 原始int8+128偏移
+    TLV_BREATH_WAVEFORM = 0x61, // 呼吸波形 uint8, 原始int8+128偏移
 };
 
 // 分层分域错误码定义 (高4位=模块，低4位=具体错误)
@@ -167,9 +180,10 @@ enum WifiSecurityType : uint8_t {
     WIFI_SEC_UNKNOWN = 255 // 未知类型
 };
 
+//数据帧结构体定义
 struct Frame {
     uint8_t version = VERSION;//协议版本
-    uint8_t cmd = 0;//命令
+    uint8_t cmd = 0;//命令在数据帧中表示具体的操作类型，如查询状态、配置WiFi等
     uint8_t flags = 0;//标志位
     uint8_t seq = 0;//序列号
     std::vector<uint8_t> data;//数据
@@ -177,13 +191,13 @@ struct Frame {
 
 class FrameParser {
 public:
-    FrameParser();
-    bool input(const uint8_t* bytes, size_t len, Frame& outFrame);
-    void reset();
+    FrameParser();//构造函数
+    bool input(const uint8_t* bytes, size_t len, Frame& outFrame);//输入数据并尝试解析出一帧
+    void reset();//重置解析器状态
 
 private:
-    std::vector<uint8_t> buffer;
-    bool tryParseOne(Frame& outFrame);
+    std::vector<uint8_t> buffer;//用于存储输入的字节数据，直到成功解析出一帧（接收蓝牙数据的缓冲区）
+    bool tryParseOne(Frame& outFrame);//尝试从缓冲区解析出一帧
 };
 
 uint16_t crc16Ccitt(const uint8_t* data, size_t len);//计算CRC16-CCITT校验和
@@ -204,9 +218,9 @@ void appendTlvU64(std::vector<uint8_t>& out, uint8_t type, uint64_t value);//添
 void appendTlvString(std::vector<uint8_t>& out, uint8_t type, const String& value);//添加字符串TLV
 void appendTlvBlock(std::vector<uint8_t>& out, uint8_t type, const std::vector<uint8_t>& value);//添加块TLV
 
-bool readTlv(const std::vector<uint8_t>& data, size_t& offset, uint8_t& type, uint16_t& len, const uint8_t*& value);
+bool readTlv(const std::vector<uint8_t>& data, size_t& offset, uint8_t& type, uint16_t& len, const uint8_t*& value);//从数据中读取一个TLV块
 
-std::vector<uint8_t> encodeFrame(const Frame& frame);
+std::vector<uint8_t> encodeFrame(const Frame& frame);//编码帧为字节数组
 
 
 } // namespace BleProto

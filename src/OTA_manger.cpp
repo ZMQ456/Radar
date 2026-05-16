@@ -65,7 +65,7 @@ const OtaUpgradeTask& getCurrentOtaTask() {
  * @return 是否有可执行的OTA任务
  */
 bool hasExecutableOtaTask() {
-    return currentOtaState == OTA_READY;
+    return currentOtaState == OTA_READY;// 只有当OTA状态为READY时才表示有可执行的OTA任务，其他状态如IDLE、RECEIVED、VALIDATED等都不表示可执行的状态
 }
 
 /**
@@ -81,17 +81,18 @@ void markOtaState(OtaState state) {
  * @param task OTA升级任务对象
  */
 void storeOtaTask(const OtaUpgradeTask& task) {
-    currentOtaTask = task;
+    currentOtaTask = task;// 存储OTA任务信息，供后续执行时使用
     currentOtaTask.receivedAt = millis();
 }
 
 /**
  * @brief 保存待处理的OTA结果
  * 用于在OTA升级完成后保存结果，等待设备重启后上报
+ * 将收到的 JSON 字符串反序列化，提取出固件版本、下载 URL、文件大小、MD5 校验和等关键信息，并存入 OtaUpgradeTask 结构体中，以供后续验证和执行 OTA 升级使用
  * @param task OTA升级任务对象
  */
 bool parseOtaUpgradeMessage(const String& payload, OtaUpgradeTask& task, String& errorMsg) {
-    JsonDocument doc;
+    JsonDocument doc;// 创建一个JsonDocument对象用于存储解析后的JSON数据
     DeserializationError error = deserializeJson(doc, payload);// 反序列化JSON字符串到JsonDocument对象中，如果失败则返回错误信息
     if (error) {
         errorMsg = "OTA message JSON parse failed";
@@ -103,21 +104,21 @@ bool parseOtaUpgradeMessage(const String& payload, OtaUpgradeTask& task, String&
         return false;
     }
 
-    JsonObject data = doc["data"].as<JsonObject>();
+    JsonObject data = doc["data"].as<JsonObject>();// 提取data对象，包含OTA升级的具体信息，强转为JsonObject类型，方便后续访问各个字段
     if (data.isNull()) {
         errorMsg = "Missing OTA data field";
         return false;
     }
 
-    task = OtaUpgradeTask{};
-    task.id = doc["id"].as<String>();
+    task = OtaUpgradeTask{};// 初始化一个空的OTA任务对象，确保所有字段都有默认值，避免未初始化的字段导致的问题
+    task.id = doc["id"].as<String>();// 提取OTA请求ID，唯一标识一次OTA升级请求,强转为String类型，兼容平台返回的不同类型的id字段
     if (doc["code"].is<int>()) {
         task.code = doc["code"].as<int>();
     } else {
         String code = doc["code"].as<String>();
-        task.code = code.toInt();
+        task.code = code.toInt();// 兼容平台返回的不同类型的code字段，尝试转换为整数，如果转换失败则默认为0
     }
-    task.message = doc["message"].as<String>();
+    task.message = doc["message"].as<String>();// 提取OTA状态消息，通常由平台返回，描述OTA升级请求的状态或错误信息
     task.version = data["version"].as<String>();
     task.module = data["module"].as<String>();
     task.signMethod = data["signMethod"].as<String>();
@@ -125,13 +126,13 @@ bool parseOtaUpgradeMessage(const String& payload, OtaUpgradeTask& task, String&
     task.sign = data["sign"].as<String>();
     task.url = data["url"].as<String>();
     task.extData = data["extData"].as<String>();
-    task.size = data["size"] | 0;
-    task.isDiff = (data["isDiff"] | 0) == 1;
+    task.size = data["size"] | 0;// 提取OTA升级包的大小，单位为字节，使用 | 0 来兼容平台返回的不同类型的size字段，如果size字段不存在或无法转换为整数，则默认为0
+    task.isDiff = (data["isDiff"] | 0) == 1;// 有些平台可能返回布尔值，有些返回整数，这里兼容两种情况，最终转换为bool类型
     task.rawPayload = payload;
     task.receivedAt = millis();
 
-    if (task.module.isEmpty()) {
-        task.module = OTA_MODULE_NAME;
+    if (task.module.isEmpty()) {// 如果平台没有返回模块信息，默认使用主控固件模块
+        task.module = OTA_MODULE_NAME;// 目前仅支持主控固件模块，后续如果有多个模块需要区分时可以根据平台返回的模块信息进行区分
     }
 
     return true;
@@ -145,14 +146,14 @@ bool parseOtaUpgradeMessage(const String& payload, OtaUpgradeTask& task, String&
  * @return OTA任务是否有效
  */
 bool validateOtaUpgradeTask(const OtaUpgradeTask& task, String& errorMsg, int& errorStep) {
-    if (task.id.isEmpty()) {
+    if (task.id.isEmpty()) {// OTA请求ID是必需的，如果缺失则无法识别和处理这个OTA任务，因此验证失败
         errorMsg = "Missing OTA request id";
         errorStep = -1;
         return false;
     }
 
-    JsonDocument rawDoc;
-    if (deserializeJson(rawDoc, task.rawPayload) || !isAcceptedOtaCode(rawDoc["code"])) {
+    JsonDocument rawDoc;// 创建一个JsonDocument对象用于存储解析后的原始JSON数据，主要是为了验证code字段是否合法
+    if (deserializeJson(rawDoc, task.rawPayload) || !isAcceptedOtaCode(rawDoc["code"])) {// 反序列化原始JSON字符串失败，或者code字段不是被接受的状态码（200或1000），都表示这个OTA任务无效，因此验证失败
         errorMsg = "Invalid OTA task status";
         errorStep = -1;
         return false;

@@ -14,7 +14,7 @@
 struct WiFiScanResult {
     String ssid;
     int rssi;
-    String security;
+    String security;// 安全类型字符串，如 "OPEN", "WEP", "WPA", "WPA2", "WPA3"
 };
 
 /**

@@ -174,7 +174,7 @@ extern QueueHandle_t phaseDataQueue; // 相位数据队列
 extern QueueHandle_t vitalDataQueue; // 生命体征数据队列
 extern QueueHandle_t uartQueue; // UART数据队列
 typedef struct {
-    uint8_t raw[256];
+    uint8_t raw[256];// 原始数据缓冲区
     size_t len;
 } BleCommandMessage;
 
@@ -184,27 +184,35 @@ extern TaskHandle_t uartProcessTaskHandle; // UART处理任务句柄
 extern BLEServer* pServer; // BLE服务器指针
 
 // Radar Data Service
-extern BLEService* radarDataService;
-extern BLECharacteristic* radarStreamCharacteristic;
-extern BLECharacteristic* radarStatusCharacteristic;
+extern BLEService* radarDataService;// 雷达数据服务
+extern BLECharacteristic* radarStreamCharacteristic;// 雷达数据流特征
+extern BLECharacteristic* radarStatusCharacteristic;// 雷达状态特征
 
 // Device Config Service
-extern BLEService* deviceConfigService;
-extern BLECharacteristic* deviceCommandCharacteristic;
-extern BLECharacteristic* deviceResultCharacteristic;
-extern BLECharacteristic* deviceInfoCharacteristic;
+extern BLEService* deviceConfigService;// 设备配置服务
+extern BLECharacteristic* deviceCommandCharacteristic;// 设备命令特征
+extern BLECharacteristic* deviceResultCharacteristic; // 设备结果特征
+extern BLECharacteristic* deviceInfoCharacteristic; // 设备信息特征
+
+
 extern bool deviceConnected; // 设备连接状态
 extern bool oldDeviceConnected; // 旧设备连接状态
 extern BleProto::FrameParser bleFrameParser; // BLE帧解析器
 extern uint8_t bleSequenceCounter; // BLE序列号计数器
 extern QueueHandle_t bleCommandQueue; // BLE命令队列
 
+/*
+   * Opcode (1字节)：告诉对方这是什么操作（比如：这是一个通知 Notify，还是一个写请求 Write）。
+   * Attribute Handle (2字节)：告诉对方这个数据是属于哪个特征值（Characteristic）的“地址”，对方可以根据这个地址知道这个数据是什么含义。
+*/
+
 // BLE MTU 协商相关常量和变量
-static constexpr uint16_t DEFAULT_ATT_MTU = 23;
-static constexpr uint16_t TARGET_ATT_MTU  = 247;
-static constexpr size_t ATT_HEADER_SIZE   = 3;
-static constexpr size_t FALLBACK_PAYLOAD  = 20;
-extern size_t g_blePayloadSize;
+static constexpr uint16_t DEFAULT_ATT_MTU = 23;// BLE默认ATT MTU大小
+static constexpr uint16_t TARGET_ATT_MTU  = 247; // 目标ATT MTU大小，ESP32的BLE库支持最大247字节的ATT MTU，这里设置为247以获得最大的有效载荷空间
+static constexpr size_t ATT_HEADER_SIZE   = 3; // ATT协议头部大小（opcode 1字节 + handle 2字节）
+static constexpr size_t FALLBACK_PAYLOAD  = 20; // 在MTU协商失败时的回退有效载荷大小，考虑到BLE协议的开销，设置为20字节以确保兼容性
+
+extern size_t g_blePayloadSize;  // 全局BLE有效载荷大小，根据MTU协商结果动态调整，默认为FALLBACK_PAYLOAD，在协商成功后更新为TARGET_ATT_MTU - ATT_HEADER_SIZE
 extern bool continuousSendEnabled; // 持续发送使能标志
 extern unsigned long continuousSendInterval; // 持续发送间隔
 extern unsigned long lastSleepDataTime; // 上次发送睡眠数据时间
@@ -219,48 +227,55 @@ extern uint16_t currentDeviceId; // 当前设备ID
 extern Preferences preferences; // Flash存储对象
 extern WiFiManager wifiManager; // WiFi管理器
 
-void initRadarManager();
-void initR60ABD1();
-bool parseR60ABD1Frame(uint8_t *frame, uint16_t frameLen);
-int16_t parseSignedCoordinate(uint16_t raw_value);
-void sendRadarCommand(uint8_t ctrl, uint8_t cmd, uint8_t value);
-void IRAM_ATTR serialRxCallback();
+// BLE请求上下文，用于跟踪异步命令的seq
+struct BleRequestContext {
+    uint8_t seq = 0;
+    bool active = false;
+};
+extern BleRequestContext wifiConfigRequestCtx;// WiFi配置请求上下文
+extern BleRequestContext wifiScanRequestCtx;  // WiFi扫描请求上下文
+extern BleRequestContext savedNetworksRequestCtx; // 已保存网络请求上下文
 
-void bleSendTask(void *parameter);
-void vitalSendTask(void *parameter);
-void radarDataTask(void *parameter);
-void uartProcessTask(void *parameter);
+void initRadarManager();// 初始化雷达管理器
+void initR60ABD1();// 初始化R60ABD1雷达
+bool parseR60ABD1Frame(uint8_t *frame, uint16_t frameLen);// 解析R60ABD1雷达数据帧
+int16_t parseSignedCoordinate(uint16_t raw_value);// 解析有符号坐标值
+void updateSensorData(const R60ABD1Data& radarData); // 更新传感器数据
+void sendRadarCommand(uint8_t ctrl, uint8_t cmd, uint8_t value);// 发送雷达命令
+void IRAM_ATTR serialRxCallback();// UART接收回调函数
 
-// ==================== 已废弃的BLE JSON函数 ====================
-// 这些函数已被纯TLV函数替代，保留声明仅为兼容性，实际调用会输出警告
+void bleSendTask(void *parameter);// BLE发送任务函数
+void vitalSendTask(void *parameter);// 生命体征发送任务函数
+void radarDataTask(void *parameter);// 雷达数据处理任务函数
+void uartProcessTask(void *parameter);// UART处理任务函数
 
-void sendJSONDataToBLE(const String& jsonData); // 已废弃：请使用sendFrameToBLE或专用TLV发送函数
-void sendCommandResultToBLE(const String& jsonData); // 已废弃：请使用sendFrameToBLE或专用TLV发送函数
 
-// 新增：WiFi专用TLV发送函数
-void sendWiFiConfigResultToBLE(bool success, const String& message, const String& ssid = "", const String& ipAddress = "");
-void sendWiFiScanResultToBLE(bool success, const String& message, const std::vector<WiFiScanResult>& networks = {});
-void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult>& networks = {});
-void sendRadarStreamToBLE(const String& jsonData);
+// ---- BLE 数据发送接口 ----
 void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar);
-bool sendCustomJSONData(const String& jsonType, const String& jsonString);
-
-bool processQueryRadarData(const BleProto::Frame& frame);
-bool processStartContinuousSend(const BleProto::Frame& frame);
-bool processStopContinuousSend(const BleProto::Frame& frame);
-void processBLEConfig();
-
-bool processSetDeviceId(const BleProto::Frame& frame);
-bool processQueryStatus(const BleProto::Frame& frame);
-bool processWiFiConfigCommand(const BleProto::Frame& frame);
-bool processScanWiFi(const BleProto::Frame& frame);
-bool processGetSavedNetworks(const BleProto::Frame& frame);
-bool processEchoRequest(const BleProto::Frame& frame);
-void sendRawEchoResponse(const String& rawData);
 void sendStatusToBLE();
+void sendRawEchoResponse(const String& rawData);
 
-bool sendDailyDataToInfluxDB(String dailyDataLine);
-void sendSleepDataToInfluxDB();
+// ---- BLE 命令处理函数 (被 processBLEConfig 分派) ----
+bool processEchoRequest(const BleProto::Frame& frame);         // CMD_PING_REQ (0x01)
+bool processQueryStatus(const BleProto::Frame& frame);         // CMD_QUERY_STATUS_REQ (0x10)
+bool processQueryRadarData(const BleProto::Frame& frame);      // CMD_QUERY_RADAR_REQ (0x12)
+bool processStartContinuousSend(const BleProto::Frame& frame); // CMD_START_CONTINUOUS_REQ (0x14)
+bool processStopContinuousSend(const BleProto::Frame& frame);  // CMD_STOP_CONTINUOUS_REQ (0x16)
+bool processSetDeviceId(const BleProto::Frame& frame);         // CMD_SET_DEVICE_ID_REQ (0x30)
+bool processWiFiConfigCommand(const BleProto::Frame& frame);   // CMD_WIFI_CONFIG_REQ (0x22)
+bool processScanWiFi(const BleProto::Frame& frame);            // CMD_WIFI_SCAN_REQ (0x20)
+bool processGetSavedNetworks(const BleProto::Frame& frame);    // CMD_GET_SAVED_WIFI_REQ (0x24)
+void processBLEConfig();                                        // 主分派入口
+
+// ---- WiFi 异步结果推送 (纯TLV) ----
+void sendWiFiConfigResultToBLE(uint8_t resultCode, uint8_t state, uint8_t step,
+                               const String& message = "", const String& ssid = "", const String& ipAddress = "");
+void sendWiFiScanResultToBLE(uint8_t resultCode, uint8_t state, uint8_t step,
+                             const String& message = "", const std::vector<WiFiScanResult>& networks = {});
+void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult>& networks = {});
+
+bool sendDailyDataToInfluxDB(String dailyDataLine);// 发送每日数据到InfluxDB，参数是符合InfluxDB Line Protocol格式的字符串
+void sendSleepDataToInfluxDB();// 发送睡眠数据到InfluxDB，函数内部会构建符合InfluxDB Line Protocol格式的数据字符串并发送
 
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override;

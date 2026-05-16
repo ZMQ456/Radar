@@ -29,7 +29,6 @@ static int dnsFailCount = 0; // DNS解析失败计数器
 const int DNS_FAIL_RESET_THRESHOLD = 3; // DNS失败重置网络阈值
 
 void resetWiFiConnection(); // WiFi连接重置函数声明
-void sendCommandResultToBLE(const String& jsonData); // BLE命令结果发送函数声明（已废弃）
 
 //const char* influxDBHost = "8.134.11.76"; // InfluxDB服务器公网地址
 const char* influxDBHost = "www.lmhrt.cn";  // InfluxDB服务器域名地址
@@ -77,6 +76,11 @@ uint8_t bleSequenceCounter = 0;       // BLE出站帧序列号计数器
 
 // BLE MTU 协商相关变量
 size_t g_blePayloadSize = FALLBACK_PAYLOAD;
+
+// BLE请求上下文：跟踪异步命令的 seq，确保回包 seq 与请求一致
+BleRequestContext wifiConfigRequestCtx; // WiFi配置请求上下文
+BleRequestContext wifiScanRequestCtx; // WiFi扫描请求上下文
+BleRequestContext savedNetworksRequestCtx;// 其他命令的请求上下文可以继续添加
 
 // BLE命令处理常量
 static const size_t MAX_LEGACY_JSON_LEN = sizeof(BleCommandMessage::raw) - 1; // legacy JSON兼容队列限制，不是TLV协议限制
@@ -182,17 +186,23 @@ void MyServerCallbacks::onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *
                   static_cast<unsigned>(g_blePayloadSize));
 }
 
+/**
+ * @brief BLE服务器MTU更新回调
+ * 当MTU协商完成或更新时触发
+ * @param pServer BLE服务器指针
+ * @param param MTU更新事件参数，包含连接ID和新的MTU值
+ */
 void MyServerCallbacks::onMtuChanged(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
-    uint16_t mtu = pServer->getPeerMTU(param->mtu.conn_id);
+    uint16_t mtu = pServer->getPeerMTU(param->mtu.conn_id);// 获取当前连接的MTU值
     
     if (mtu >= DEFAULT_ATT_MTU) {
-        g_blePayloadSize = mtu - ATT_HEADER_SIZE;
+        g_blePayloadSize = mtu - ATT_HEADER_SIZE;// 计算可用的有效载荷大小
     } else {
-        g_blePayloadSize = FALLBACK_PAYLOAD;
+        g_blePayloadSize = FALLBACK_PAYLOAD;// MTU协商失败，使用回退有效载荷大小
     }
     
     if (g_blePayloadSize < FALLBACK_PAYLOAD) {
-        g_blePayloadSize = FALLBACK_PAYLOAD;
+        g_blePayloadSize = FALLBACK_PAYLOAD;// 确保有效载荷大小不小于回退值
     }
     
     Serial.printf("📏 [BLE] MTU 已更新, conn_id=%u, MTU=%u, payload=%u\n",
@@ -270,7 +280,8 @@ void initRadarManager() {
     } else {
         Serial.println("✅ BLE命令队列创建成功");
     }
-
+    // 创建FreeRTOS任务
+    // BLE数据发送任务，优先级较高，确保及时响应BLE命令和发送数据
     xTaskCreatePinnedToCore(
         bleSendTask,
         "BleSendTask",
@@ -281,6 +292,7 @@ void initRadarManager() {
         1
     );
     
+    // 生命体征数据发送任务，优先级较高，确保及时发送
     xTaskCreatePinnedToCore(
         vitalSendTask,
         "VitalSendTask",
@@ -291,6 +303,7 @@ void initRadarManager() {
         1
     );
     
+    // 雷达数据处理任务，优先级较低，避免阻塞其他关键任务
     xTaskCreatePinnedToCore(
         radarDataTask,
         "RadarProcessTask",
@@ -301,6 +314,7 @@ void initRadarManager() {
         1
     );
     
+    // UART数据处理任务，优先级较低，避免阻塞其他关键任务
     xTaskCreatePinnedToCore(
         uartProcessTask,
         "UartProcessTask",
@@ -655,7 +669,7 @@ bool parseR60ABD1Frame(uint8_t *frame, uint16_t frameLen) {
     
     return true;
 }
-
+// 解析带符号的坐标值
 int16_t parseSignedCoordinate(uint16_t raw_value) {
     bool is_negative = (raw_value & 0x8000) != 0;
     uint16_t magnitude = raw_value & 0x7FFF;
@@ -771,12 +785,12 @@ void bleSendTask(void *parameter) {
                 // 检查数据是否发生变化
                 if (isDataChanged()) {
                     // 构建TLV帧
-                    BleProto::Frame frame;
-                    frame.version = BleProto::VERSION;
-                    frame.cmd = BleProto::CMD_CONTINUOUS_PUSH;
+                    BleProto::Frame frame;// 创建一个新的TLV帧
+                    frame.version = BleProto::VERSION;// 设置协议版本
+                    frame.cmd = BleProto::CMD_CONTINUOUS_PUSH;// 设置命令类型为连续推送
                     frame.flags = 0;
-                    frame.seq = bleSequenceCounter++;
-                    frame.data.clear();
+                    frame.seq = bleSequenceCounter++;// 设置序列号并自增
+                    frame.data.clear();// 清空数据部分以准备添加新的TLV数据
                     
                     // 添加时间戳
                     BleProto::appendTlvU32(frame.data, BleProto::TLV_TIMESTAMP, currentTime);
@@ -794,9 +808,11 @@ void bleSendTask(void *parameter) {
                         BleProto::appendTlvI16(frame.data, BleProto::TLV_POS_X_MM, sensorData.pos_x);
                         BleProto::appendTlvI16(frame.data, BleProto::TLV_POS_Y_MM, sensorData.pos_y);
                         BleProto::appendTlvI16(frame.data, BleProto::TLV_POS_Z_MM, sensorData.pos_z);
-                        
-                        // 暂时跳过波形数据，等待添加专用的TLV类型
-                        // TODO: 添加 TLV_HEART_WAVEFORM 和 TLV_BREATH_WAVEFORM 常量
+                        // 波形数据（取当前最新一点）
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_HEART_WAVEFORM,
+                                             static_cast<uint8_t>(static_cast<int8_t>(sensorData.heart_waveform[0]) + 128));
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_BREATH_WAVEFORM,
+                                             static_cast<uint8_t>(static_cast<int8_t>(sensorData.breath_waveform[0]) + 128));
                     } else {
                         // 无人时的基础数据
                         BleProto::appendTlvU8(frame.data, BleProto::TLV_PRESENCE, 0);
@@ -808,7 +824,7 @@ void bleSendTask(void *parameter) {
                     }
                     
                     // 发送TLV帧到雷达数据流特征
-                    sendFrameToBLE(frame, radarStreamCharacteristic);
+                    sendFrameToBLE(frame, radarStreamCharacteristic);// 发送数据到BLE
 
                     // 更新最后发送的数据
                     lastSentData.heart_rate = sensorData.heart_rate;
@@ -1470,28 +1486,9 @@ void uartProcessTask(void *parameter) {
     }
 }
 
-/**
- * @brief 发送JSON数据到BLE（TLV帧封装）
- * 将JSON字符串通过 BleProto::encodeLegacyJsonToFrame 转换为TLV帧后分包发送。
- * 每包最大20字节，包间延迟10ms，使用互斥锁保证线程安全。
- * @param jsonData JSON格式数据字符串
- */
-void sendJSONDataToBLE(const String& jsonData) {
-    Serial.println("⚠️ [BLE] sendJSONDataToBLE已废弃，请使用对应的TLV发送函数");
-    Serial.printf("⚠️ [BLE] 废弃调用数据: %s\n", jsonData.c_str());
-    // 不再执行实际发送，避免JSON依赖
-}
 
-/**
- * @brief 发送命令结果到BLE（已废弃，请使用TLV函数）
- * @deprecated 请使用sendFrameToBLE或对应的专用TLV发送函数
- * @param jsonData JSON格式数据字符串
- */
-void sendCommandResultToBLE(const String& jsonData) {
-    Serial.println("⚠️ [BLE] sendCommandResultToBLE已废弃，请使用sendFrameToBLE或专用TLV发送函数");
-    Serial.printf("⚠️ [BLE] 废弃调用数据: %s\n", jsonData.c_str());
-    // 不再执行实际发送，避免JSON依赖
-}
+
+
 
 /**
  * @brief 发送TLV帧到BLE（通用二进制帧发送器）
@@ -1504,7 +1501,7 @@ void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar) {
         return;
     }
 
-    if (!deviceConnected || pChar == nullptr) {
+    if (!deviceConnected || pChar == nullptr) {//连接检查和特征指针检查(指针为空可能是未初始化或已断开连接)
         xSemaphoreGive(bleSendMutex);
         return;
     }
@@ -1513,10 +1510,15 @@ void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar) {
     const size_t maxPacketSize = g_blePayloadSize > 0 ? g_blePayloadSize : FALLBACK_PAYLOAD;
     size_t offset = 0;
 
-    while (offset < raw.size()) {
-        size_t chunkLen = min(maxPacketSize, raw.size() - offset);
-        pChar->setValue(raw.data() + offset, chunkLen);
-        pChar->notify();
+    while (offset < raw.size()) {//chunkLen：计算当前还剩多少字节，如果超过了 MTU 上限，就只切出 MTU 大小的一块
+        size_t chunkLen = min(maxPacketSize, raw.size() - offset);//setValue：将切出的这一块数据设置到 BLE 特征中，notify() 触发发送
+        pChar->setValue(raw.data() + offset, chunkLen); //先把货放在柜台上
+        pChar->notify();//2. 再按门铃告诉手机：“货更新了，快来拿！
+
+        /*
+          如果没有第二步 notify()：
+          即便你调用了一万次 setValue，手机端也不会收到任何通知，除非手机主动来读取（Read）这个特征值。
+        */
 
         offset += chunkLen;
         if (offset < raw.size()) {
@@ -1646,30 +1648,53 @@ bool processStopContinuousSend(const BleProto::Frame& frame) {
 }
 
 /**
- * @brief 处理BLE配置数据
+ * @brief 处理BLE配置数据 — 根据命令码分派到对应处理函数
  */
 void processBLEConfig() {
     if (bleCommandQueue == nullptr) {
         return;
     }
-    
+
     BleCommandMessage msg;
     while (xQueueReceive(bleCommandQueue, &msg, 0) == pdTRUE) {
         BleProto::Frame frame;
         bool parsed = bleFrameParser.input(msg.raw, msg.len, frame);
 
         while (parsed) {
-            bool processed = false;
-            
-            if (!processed) processed = processSetDeviceId(frame);
-            if (!processed) processed = processWiFiConfigCommand(frame);
-            if (!processed) processed = processQueryStatus(frame);
-            if (!processed) processed = processQueryRadarData(frame);
-            if (!processed) processed = processStartContinuousSend(frame);
-            if (!processed) processed = processStopContinuousSend(frame);
-            if (!processed) processed = processScanWiFi(frame);
-            if (!processed) processed = processGetSavedNetworks(frame);
-            if (!processed) processed = processEchoRequest(frame);
+            bool processed = true;
+
+            switch (frame.cmd) {
+                case BleProto::CMD_PING_REQ:
+                    processEchoRequest(frame);
+                    break;
+                case BleProto::CMD_QUERY_STATUS_REQ:
+                    processQueryStatus(frame);
+                    break;
+                case BleProto::CMD_QUERY_RADAR_REQ:
+                    processQueryRadarData(frame);
+                    break;
+                case BleProto::CMD_START_CONTINUOUS_REQ:
+                    processStartContinuousSend(frame);
+                    break;
+                case BleProto::CMD_STOP_CONTINUOUS_REQ:
+                    processStopContinuousSend(frame);
+                    break;
+                case BleProto::CMD_SET_DEVICE_ID_REQ:
+                    processSetDeviceId(frame);
+                    break;
+                case BleProto::CMD_WIFI_CONFIG_REQ:
+                    processWiFiConfigCommand(frame);
+                    break;
+                case BleProto::CMD_WIFI_SCAN_REQ:
+                    processScanWiFi(frame);
+                    break;
+                case BleProto::CMD_GET_SAVED_WIFI_REQ:
+                    processGetSavedNetworks(frame);
+                    break;
+                default:
+                    processed = false;
+                    break;
+            }
 
             if (!processed && deviceConnected) {
                 BleProto::Frame respFrame;
@@ -1685,7 +1710,7 @@ void processBLEConfig() {
                     sendFrameToBLE(respFrame, deviceResultCharacteristic);
                 }
             }
-            
+
             parsed = bleFrameParser.input(nullptr, 0, frame);
         }
     }
@@ -1756,145 +1781,181 @@ bool processSetDeviceId(const BleProto::Frame& frame) {
 }
 
 /**
- * @brief 发送设备状态到BLE
+ * @brief 构建状态响应帧的TLV数据（sendStatusToBLE / processQueryStatus 共用）
  */
-void sendStatusToBLE() {
-    if (deviceConnected) {
-        BleProto::Frame respFrame;
-        respFrame.version = BleProto::VERSION;
-        respFrame.cmd = BleProto::CMD_STATUS_RESP;
-        respFrame.flags = 0;
-        respFrame.seq = bleSequenceCounter++;
-        
-        BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
-        BleProto::appendTlvU16(respFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
-        BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONFIGURED, wifiManager.getSavedNetworkCount() > 0 ? 1 : 0);
-        BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONNECTED, WiFi.status() == WL_CONNECTED ? 1 : 0);
-        if (WiFi.status() == WL_CONNECTED) {
-            BleProto::appendTlvString(respFrame.data, BleProto::TLV_IP_ADDRESS, WiFi.localIP().toString());
-        }
-        
-        if (deviceResultCharacteristic != nullptr) {
-            sendFrameToBLE(respFrame, deviceResultCharacteristic);
-        }
-        Serial.println("已发送连接状态信息");
+static void buildStatusPayload(BleProto::Frame& respFrame) {
+    BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+    BleProto::appendTlvU16(respFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
+    BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONFIGURED, wifiManager.getSavedNetworkCount() > 0 ? 1 : 0);
+    BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONNECTED, WiFi.status() == WL_CONNECTED ? 1 : 0);
+    if (WiFi.status() == WL_CONNECTED) {
+        BleProto::appendTlvString(respFrame.data, BleProto::TLV_IP_ADDRESS, WiFi.localIP().toString());
     }
 }
 
 /**
- * @brief 处理查询状态命令
+ * @brief 主动推送设备状态到BLE（用内部序列号）
+ */
+void sendStatusToBLE() {
+    if (!deviceConnected || deviceResultCharacteristic == nullptr) return;
+
+    BleProto::Frame respFrame;
+    respFrame.version = BleProto::VERSION;
+    respFrame.cmd = BleProto::CMD_STATUS_RESP;
+    respFrame.flags = 0;
+    respFrame.seq = bleSequenceCounter++;
+    buildStatusPayload(respFrame);
+    sendFrameToBLE(respFrame, deviceResultCharacteristic);
+    Serial.println("已发送连接状态信息");
+}
+
+/**
+ * @brief 处理查询状态命令（用请求的序列号回复）
  */
 bool processQueryStatus(const BleProto::Frame& frame) {
-    if (frame.cmd == BleProto::CMD_QUERY_STATUS_REQ) {
-        if (deviceConnected) {
-            BleProto::Frame respFrame;
-            respFrame.version = BleProto::VERSION;
-            respFrame.cmd = BleProto::CMD_STATUS_RESP;
-            respFrame.flags = 0;
-            respFrame.seq = frame.seq;
-            
-            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
-            BleProto::appendTlvU16(respFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
-            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONFIGURED, wifiManager.getSavedNetworkCount() > 0 ? 1 : 0);
-            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONNECTED, WiFi.status() == WL_CONNECTED ? 1 : 0);
-            if (WiFi.status() == WL_CONNECTED) {
-                BleProto::appendTlvString(respFrame.data, BleProto::TLV_IP_ADDRESS, WiFi.localIP().toString());
-            }
-            
-            if (deviceResultCharacteristic != nullptr) {
-                sendFrameToBLE(respFrame, deviceResultCharacteristic);
-            }
-            Serial.println("已发送设备状态信息");
-        }
-        return true;
+    if (frame.cmd != BleProto::CMD_QUERY_STATUS_REQ) return false;
+
+    if (deviceConnected && deviceResultCharacteristic != nullptr) {
+        BleProto::Frame respFrame;
+        respFrame.version = BleProto::VERSION;
+        respFrame.cmd = BleProto::CMD_STATUS_RESP;
+        respFrame.flags = 0;
+        respFrame.seq = frame.seq;
+        buildStatusPayload(respFrame);
+        sendFrameToBLE(respFrame, deviceResultCharacteristic);
+        Serial.println("已发送设备状态信息");
     }
-    return false;
+    return true;
 }
 
 /**
  * @brief 处理WiFi配置命令
  */
 bool processWiFiConfigCommand(const BleProto::Frame& frame) {
-    if (frame.cmd == BleProto::CMD_WIFI_CONFIG_REQ) {
-        Serial.println("📱 [BLE-WiFi] 收到WiFi配置命令");
-        
-        size_t offset = 0;
-        uint8_t type = 0;
-        uint16_t len = 0;
-        const uint8_t* value = nullptr;
-        String newSSID = "";
-        String newPassword = "";
+    if (frame.cmd != BleProto::CMD_WIFI_CONFIG_REQ) {
+        return false;
+    }
 
-        while (BleProto::readTlv(frame.data, offset, type, len, value)) {
-            if (type == BleProto::TLV_SSID) {
-                newSSID = String((const char*)value, len);
-            } else if (type == BleProto::TLV_PASSWORD) {
-                newPassword = String((const char*)value, len);
-            }
-        }
-        
-        if (newSSID.length() > 0 && newPassword.length() > 0) {
-            return wifiManager.handleConfigurationData(newSSID.c_str(), newPassword.c_str());
-        } else {
-            Serial.println("❌ [BLE-WiFi] WiFi配置参数不完整");
-            if (deviceConnected) {
-                BleProto::Frame respFrame;
-                respFrame.version = BleProto::VERSION;
-                respFrame.cmd = BleProto::CMD_WIFI_CONFIG_RESP;
-                respFrame.flags = BleProto::FLAG_IS_ERROR;
-                respFrame.seq = frame.seq;
-                BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::ERR_PROTO_PARAM_MISSING);
-                BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::FAILED);
-                BleProto::appendTlvString(respFrame.data, BleProto::TLV_ERROR_MESSAGE, "WiFi配置参数不完整");
-                if (deviceResultCharacteristic != nullptr) {
-                    sendFrameToBLE(respFrame, deviceResultCharacteristic);
-                }
-            }
-            return true;
+    Serial.println("📱 [BLE-WiFi] 收到WiFi配置命令");
+
+    size_t offset = 0;
+    uint8_t type = 0;
+    uint16_t len = 0;
+    const uint8_t* value = nullptr;
+    String newSSID = "";
+    String newPassword = "";
+
+    while (BleProto::readTlv(frame.data, offset, type, len, value)) {
+        if (type == BleProto::TLV_SSID) {
+            newSSID = String((const char*)value, len);
+        } else if (type == BleProto::TLV_PASSWORD) {
+            newPassword = String((const char*)value, len);
         }
     }
-    return false;
+
+    if (newSSID.length() == 0 || newPassword.length() == 0) {
+        Serial.println("❌ [BLE-WiFi] WiFi配置参数不完整");
+        if (deviceConnected && deviceResultCharacteristic != nullptr) {
+            BleProto::Frame respFrame;
+            respFrame.version = BleProto::VERSION;
+            respFrame.cmd = BleProto::CMD_WIFI_CONFIG_RESP;
+            respFrame.flags = BleProto::FLAG_IS_ERROR;
+            respFrame.seq = frame.seq;
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::ERR_PROTO_PARAM_MISSING);
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::FAILED);
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STEP, BleProto::Step::RECEIVED);
+            BleProto::appendTlvString(respFrame.data, BleProto::TLV_ERROR_MESSAGE, "WiFi配置参数不完整");
+            sendFrameToBLE(respFrame, deviceResultCharacteristic);
+        }
+        return true;
+    }
+
+    // 保存本次请求的 seq
+    wifiConfigRequestCtx.seq = frame.seq;
+    wifiConfigRequestCtx.active = true;
+
+    // 立即 ACK：告诉小程序"已收到，处理中"
+    if (deviceConnected && deviceResultCharacteristic != nullptr) {
+        BleProto::Frame ackFrame;
+        ackFrame.version = BleProto::VERSION;
+        ackFrame.cmd = BleProto::CMD_WIFI_CONFIG_RESP;
+        ackFrame.flags = 0;
+        ackFrame.seq = frame.seq;
+        BleProto::appendTlvU8(ackFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::PROCESSING);
+        BleProto::appendTlvU8(ackFrame.data, BleProto::TLV_STATE, BleProto::State::PROCESSING);
+        BleProto::appendTlvU8(ackFrame.data, BleProto::TLV_STEP, BleProto::Step::RECEIVED);
+        BleProto::appendTlvString(ackFrame.data, BleProto::TLV_SSID, newSSID);
+        sendFrameToBLE(ackFrame, deviceResultCharacteristic);
+    }
+
+    // 启动异步配网流程（结果通过 sendWiFiConfigResultToBLE 异步回包）
+    wifiManager.handleConfigurationData(newSSID.c_str(), newPassword.c_str());//
+    return true;
 }
 
 /**
  * @brief 处理扫描WiFi命令
  */
 bool processScanWiFi(const BleProto::Frame& frame) {
-    if (frame.cmd == BleProto::CMD_WIFI_SCAN_REQ) {
-        Serial.println("📱 [BLE-WiFi] 收到WiFi扫描命令");
-        
-        if (wifiManager.startScan(30000)) {
-            Serial.println("✅ 扫描已启动");
-            return true;
-        } else {
+    if (frame.cmd != BleProto::CMD_WIFI_SCAN_REQ) {
+        return false;
+    }
+
+    Serial.println("📱 [BLE-WiFi] 收到WiFi扫描命令");
+
+    // 保存本次请求的 seq
+    wifiScanRequestCtx.seq = frame.seq;
+    wifiScanRequestCtx.active = true;
+
+    // 立即回 processing
+    if (deviceConnected && deviceResultCharacteristic != nullptr) {
+        BleProto::Frame ackFrame;
+        ackFrame.version = BleProto::VERSION;
+        ackFrame.cmd = BleProto::CMD_WIFI_SCAN_RESP;
+        ackFrame.flags = 0;
+        ackFrame.seq = frame.seq;
+        BleProto::appendTlvU8(ackFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::PROCESSING);// 结果码先返回 PROCESSING，等扫描完成后再回 SUCCESS 或具体错误码
+        BleProto::appendTlvU8(ackFrame.data, BleProto::TLV_STATE, BleProto::State::PROCESSING);// 状态也先返回 PROCESSING，等扫描完成后再回 SUCCESS 或 FAILED
+        BleProto::appendTlvU8(ackFrame.data, BleProto::TLV_STEP, BleProto::Step::SCANNING);// 步骤先返回 SCANNING，等扫描完成后再回 SUCCESS 或 FAILED
+        sendFrameToBLE(ackFrame, deviceResultCharacteristic);
+    }
+
+    if (!wifiManager.startScan(30000)) {
+        // 启动失败，立即回错误包
+        if (deviceConnected && deviceResultCharacteristic != nullptr) {
             BleProto::Frame respFrame;
             respFrame.version = BleProto::VERSION;
             respFrame.cmd = BleProto::CMD_WIFI_SCAN_RESP;
             respFrame.flags = BleProto::FLAG_IS_ERROR;
-            respFrame.seq = frame.seq;
-            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::ERR_WIFI_BUSY);
-            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::FAILED);
+            respFrame.seq = frame.seq;// 结果码直接返回具体错误码，表示无法启动扫描（可能是正在连接WiFi或已有扫描在进行）
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::ERR_WIFI_BUSY);// 具体错误码返回忙碌状态，表示当前无法启动扫描（可能是正在连接WiFi或已有扫描在进行）
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::FAILED);// 状态直接返回 FAILED，因为连扫描都启动不了，后续步骤自然也无法进行
+            BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STEP, BleProto::Step::SCANNING);// 步骤保持 SCANNING，因为这是在扫描阶段就失败了
             BleProto::appendTlvString(respFrame.data, BleProto::TLV_ERROR_MESSAGE, "无法启动扫描");
-            if (deviceResultCharacteristic != nullptr) {
-                sendFrameToBLE(respFrame, deviceResultCharacteristic);
-            }
-            return false;
+            sendFrameToBLE(respFrame, deviceResultCharacteristic);
         }
+        wifiScanRequestCtx.active = false;
     }
-    return false;
-}
 
+    return true; // 命令已识别，始终返回 true
+}
+/**
+ * @brief 处理获取已保存WiFi网络命令
+ */
 bool processGetSavedNetworks(const BleProto::Frame& frame) {
-    if (frame.cmd == BleProto::CMD_GET_SAVED_WIFI_REQ) {
-        Serial.println("📱 [BLE-WiFi] 收到获取已保存WiFi网络命令");
-        wifiManager.getSavedNetworks();
-        return true;
+    if (frame.cmd != BleProto::CMD_GET_SAVED_WIFI_REQ) {
+        return false;
     }
-    return false;
+    Serial.println("📱 [BLE-WiFi] 收到获取已保存WiFi网络命令");
+    savedNetworksRequestCtx.seq = frame.seq;
+    savedNetworksRequestCtx.active = true;
+    wifiManager.getSavedNetworks();
+    return true;
 }
 
 /**
- * @brief 处理回显请求命令
+ * @brief 处理回显请求命令，类似于网络中的ping命令，可以携带任意字符串，设备原样返回，主要用于测试BLE通信的可靠性和时延
+ * 类似于心跳包，但这个是由手机端主动发起的，设备收到后原样返回，可以携带任意字符串内容，手机端可以通过这个命令来测试BLE通信的可靠性和时延
  */
 bool processEchoRequest(const BleProto::Frame& frame) {
     if (frame.cmd == BleProto::CMD_PING_REQ) {
@@ -1934,47 +1995,24 @@ bool processEchoRequest(const BleProto::Frame& frame) {
 }
 
 /**
- * @brief 发送原始数据回显响应
- */
-void sendRawEchoResponse(const String& rawData) {
-    // This is skipped in purely binary but kept as a stub for compilation
-}
-
-/**
  * @brief 发送WiFi配置结果到BLE (纯TLV格式)
+ * @param resultCode 具体错误码（BleProto::ErrorCode::*）
+ * @param state      状态（BleProto::State::*）
+ * @param step       步骤（BleProto::Step::*）
  */
-void sendWiFiConfigResultToBLE(bool success, const String& message, const String& ssid, const String& ipAddress) {
+void sendWiFiConfigResultToBLE(uint8_t resultCode, uint8_t state, uint8_t step,
+                               const String& message, const String& ssid, const String& ipAddress) {
     BleProto::Frame frame;
     frame.version = BleProto::VERSION;
     frame.cmd = BleProto::CMD_WIFI_CONFIG_RESP;
-    frame.flags = 0;
-    frame.seq = 0;
+    frame.flags = (state == BleProto::State::FAILED) ? BleProto::FLAG_IS_ERROR : 0;
+    frame.seq = wifiConfigRequestCtx.active ? wifiConfigRequestCtx.seq : 0;
     frame.data.clear();
-    
-    // 智能WiFi错误映射
-    uint8_t resultCode = success ? BleProto::ErrorCode::SUCCESS : BleProto::ErrorCode::ERR_WIFI_CONNECT_TIMEOUT;
-    uint8_t state = success ? BleProto::State::SUCCESS : BleProto::State::FAILED;
-    uint8_t step = BleProto::Step::COMPLETED;
-    
-    // 根据错误消息智能推断具体错误码
-    if (!success && message.length() > 0) {
-        String msg = message;
-        msg.toLowerCase();
-        if (msg.indexOf("password") >= 0 || msg.indexOf("密码") >= 0) {
-            resultCode = BleProto::ErrorCode::ERR_WIFI_WRONG_PASSWORD;
-        } else if (msg.indexOf("timeout") >= 0 || msg.indexOf("超时") >= 0) {
-            resultCode = BleProto::ErrorCode::ERR_WIFI_CONNECT_TIMEOUT;
-        } else if (msg.indexOf("scan") >= 0 || msg.indexOf("扫描") >= 0) {
-            resultCode = BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT;
-        } else if (msg.indexOf("占用") >= 0 || msg.indexOf("busy") >= 0) {
-            resultCode = BleProto::ErrorCode::ERR_WIFI_BUSY;
-        }
-    }
-    
+
     BleProto::appendTlvU8(frame.data, BleProto::TLV_RESULT_CODE, resultCode);
     BleProto::appendTlvU8(frame.data, BleProto::TLV_STATE, state);
     BleProto::appendTlvU8(frame.data, BleProto::TLV_STEP, step);
-    
+
     if (message.length() > 0) {
         BleProto::appendTlvString(frame.data, BleProto::TLV_MESSAGE, message);
     }
@@ -1984,51 +2022,63 @@ void sendWiFiConfigResultToBLE(bool success, const String& message, const String
     if (ipAddress.length() > 0) {
         BleProto::appendTlvString(frame.data, BleProto::TLV_IP_ADDRESS, ipAddress);
     }
-    
+
     sendFrameToBLE(frame, deviceResultCharacteristic);
+
+    // 最终结果后清除上下文
+    if (state == BleProto::State::SUCCESS || state == BleProto::State::FAILED) {
+        wifiConfigRequestCtx.active = false;
+    }
 }
 
 /**
  * @brief 发送WiFi扫描结果到BLE (纯TLV格式)
+ * @param resultCode 具体错误码（BleProto::ErrorCode::*）
+ * @param state      状态（BleProto::State::*）
+ * @param step       步骤（BleProto::Step::*）
+ * @param message     附加的文本提示信息（如果有的话）。
+ * @param networks    设备扫描到的每一个 Wi-Fi 热点的详细信息列表，包括 SSID、信号强度、加密类型等（如果有的话）。
  */
-void sendWiFiScanResultToBLE(bool success, const String& message, const std::vector<WiFiScanResult>& networks) {
+void sendWiFiScanResultToBLE(uint8_t resultCode, uint8_t state, uint8_t step,
+                             const String& message, const std::vector<WiFiScanResult>& networks) {
     BleProto::Frame frame;
     frame.version = BleProto::VERSION;
     frame.cmd = BleProto::CMD_WIFI_SCAN_RESP;
-    frame.flags = 0;
-    frame.seq = 0;
+    frame.flags = (state == BleProto::State::FAILED) ? BleProto::FLAG_IS_ERROR : 0;
+    frame.seq = wifiScanRequestCtx.active ? wifiScanRequestCtx.seq : 0;
     frame.data.clear();
-    
-    uint8_t resultCode = success ? BleProto::ErrorCode::SUCCESS : BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT;
+
     BleProto::appendTlvU8(frame.data, BleProto::TLV_RESULT_CODE, resultCode);
-    BleProto::appendTlvU8(frame.data, BleProto::TLV_STATE, success ? BleProto::State::SUCCESS : BleProto::State::FAILED);
-    BleProto::appendTlvU8(frame.data, BleProto::TLV_STEP, BleProto::Step::COMPLETED);
-    
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_STATE, state);
+    BleProto::appendTlvU8(frame.data, BleProto::TLV_STEP, step);
+
     if (message.length() > 0) {
         BleProto::appendTlvString(frame.data, BleProto::TLV_MESSAGE, message);
     }
-    
-    // 添加WiFi网络列表
-    BleProto::appendTlvU16(frame.data, BleProto::TLV_WIFI_COUNT, static_cast<uint16_t>(networks.size()));
-    
-    for (const auto& network : networks) {
-        std::vector<uint8_t> wifiItem;
-        BleProto::appendTlvString(wifiItem, BleProto::TLV_SSID, network.ssid);
-        BleProto::appendTlvU8(wifiItem, BleProto::TLV_RSSI, static_cast<uint8_t>(static_cast<int8_t>(network.rssi)));
-        
-        // 转换安全类型
-        BleProto::WifiSecurityType secType = BleProto::WIFI_SEC_UNKNOWN;
-        if (network.security == "OPEN") secType = BleProto::WIFI_SEC_OPEN;
-        else if (network.security == "WEP") secType = BleProto::WIFI_SEC_WEP;
-        else if (network.security == "WPA" || network.security == "WPA/WPA2") secType = BleProto::WIFI_SEC_WPA;
-        else if (network.security == "WPA2" || network.security == "WPA2-PSK") secType = BleProto::WIFI_SEC_WPA2;
-        else if (network.security == "WPA3") secType = BleProto::WIFI_SEC_WPA3;
-        
-        BleProto::appendTlvU8(wifiItem, BleProto::TLV_SECURITY, static_cast<uint8_t>(secType));
-        BleProto::appendTlvBlock(frame.data, BleProto::TLV_WIFI_ITEM, wifiItem);
+
+    if (!networks.empty()) {//如果不为空，才继续处理网络列表并添加到TLV数据中
+        BleProto::appendTlvU16(frame.data, BleProto::TLV_WIFI_COUNT, static_cast<uint16_t>(networks.size()));
+        for (const auto& network : networks) {
+            std::vector<uint8_t> wifiItem;
+            BleProto::appendTlvString(wifiItem, BleProto::TLV_SSID, network.ssid);// SSID作为一个独立的TLV项，放在wifiItem这个块里
+            BleProto::appendTlvU8(wifiItem, BleProto::TLV_RSSI, static_cast<uint8_t>(static_cast<int8_t>(network.rssi)));// RSSI也作为wifiItem块里的一个TLV项，注意要转换成无符号8位整数
+            BleProto::WifiSecurityType secType = BleProto::WIFI_SEC_UNKNOWN;// 安全类型同样作为wifiItem块里的一个TLV项，根据扫描结果中的security字符串来转换成协议定义的安全类型枚举值
+            if (network.security == "OPEN") secType = BleProto::WIFI_SEC_OPEN;// 根据扫描结果中的security字符串来转换成协议定义的安全类型枚举值
+            else if (network.security == "WEP") secType = BleProto::WIFI_SEC_WEP;
+            else if (network.security == "WPA" || network.security == "WPA/WPA2") secType = BleProto::WIFI_SEC_WPA;
+            else if (network.security == "WPA2" || network.security == "WPA2-PSK") secType = BleProto::WIFI_SEC_WPA2;
+            else if (network.security == "WPA3") secType = BleProto::WIFI_SEC_WPA3;
+            BleProto::appendTlvU8(wifiItem, BleProto::TLV_SECURITY, static_cast<uint8_t>(secType));// 安全类型同样作为wifiItem块里的一个TLV项，根据扫描结果中的security字符串来转换成协议定义的安全类型枚举值
+            BleProto::appendTlvBlock(frame.data, BleProto::TLV_WIFI_ITEM, wifiItem);// 最后把这个wifiItem块作为一个TLV项添加到总的TLV数据中，TLV_WIFI_ITEM表示这是一个WiFi网络列表项，value就是wifiItem这个块数据，里面包含了SSID、RSSI、安全类型等信息
+        }
     }
-    
+
     sendFrameToBLE(frame, deviceResultCharacteristic);
+
+    // 最终结果后清除上下文
+    if (state == BleProto::State::SUCCESS || state == BleProto::State::FAILED) {
+        wifiScanRequestCtx.active = false;
+    }
 }
 
 /**
@@ -2037,25 +2087,23 @@ void sendWiFiScanResultToBLE(bool success, const String& message, const std::vec
 void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult>& networks) {
     BleProto::Frame frame;
     frame.version = BleProto::VERSION;
-    frame.cmd = BleProto::CMD_GET_SAVED_WIFI_RESP;
-    frame.flags = 0;
-    frame.seq = 0;
+    frame.cmd = BleProto::CMD_GET_SAVED_WIFI_RESP;// wifi扫描结果的响应命令
+    frame.flags = (success ? 0 : BleProto::FLAG_IS_ERROR);// 根据成功与否设置错误标志
+    frame.seq = savedNetworksRequestCtx.active ? savedNetworksRequestCtx.seq : 0;// 使用保存的 seq，如果没有就用0
     frame.data.clear();
-    
-    uint8_t resultCode = success ? BleProto::ErrorCode::SUCCESS : BleProto::ErrorCode::ERR_DEV_STORAGE_FAIL;
+
+    uint8_t resultCode = success ? BleProto::ErrorCode::SUCCESS : BleProto::ErrorCode::ERR_DEV_STORAGE_FAIL;// 根据成功与否设置结果码，成功是 SUCCESS，失败是具体的存储失败错误码
     BleProto::appendTlvU8(frame.data, BleProto::TLV_RESULT_CODE, resultCode);
     BleProto::appendTlvU8(frame.data, BleProto::TLV_STATE, success ? BleProto::State::SUCCESS : BleProto::State::FAILED);
     BleProto::appendTlvU8(frame.data, BleProto::TLV_STEP, BleProto::Step::COMPLETED);
-    
-    // 添加保存的WiFi网络列表
+
     BleProto::appendTlvU16(frame.data, BleProto::TLV_WIFI_COUNT, static_cast<uint16_t>(networks.size()));
-    
     for (const auto& network : networks) {
         std::vector<uint8_t> wifiItem;
         BleProto::appendTlvString(wifiItem, BleProto::TLV_SSID, network.ssid);
-        // 保存的网络不显示RSSI和安全类型
         BleProto::appendTlvBlock(frame.data, BleProto::TLV_WIFI_ITEM, wifiItem);
     }
-    
+
     sendFrameToBLE(frame, deviceResultCharacteristic);
+    savedNetworksRequestCtx.active = false;
 }

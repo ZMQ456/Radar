@@ -20,6 +20,11 @@ uint64_t device_sn = 0;//设备SN，初始为0，后续从Flash中加载
 PhysioDataProcessor* physioProcessor;//生理数据处理器
 SimpleEmotionAnalyzer* emotionAnalyzer;//情感分析器
 
+// 情绪分析结果全局缓存（供 updateRadarStatus 和 mqtt.cpp 读取）
+EmotionResult g_lastEmotionResult = {};
+bool g_hasEmotionResult = false;
+unsigned long g_lastEmotionUpdateMs = 0;
+
 bool clearConfigRequested = false;//是否请求清除配置
 bool forceLedOff = false;//是否强制关闭LED
 
@@ -615,19 +620,23 @@ void bleConfigTask(void *parameter) {
     // 初始化设备信息特征 - 纯TLV格式静态信息
     BleProto::Frame deviceInfoFrame;
     deviceInfoFrame.version = BleProto::VERSION;
-    deviceInfoFrame.cmd = BleProto::CMD_STATUS_RESP;  // 使用状态响应命令
+    deviceInfoFrame.cmd = BleProto::CMD_STATUS_RESP;
     deviceInfoFrame.flags = 0;
     deviceInfoFrame.seq = 0;
     deviceInfoFrame.data.clear();
     
-    // 添加设备信息TLV字段
-    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_DEVICE_ID, String(currentDeviceId));
+    // 添加设备信息TLV字段（与 updateDeviceInfo() 保持一致）
+    BleProto::appendTlvU8(deviceInfoFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
+    BleProto::appendTlvU16(deviceInfoFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
     BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_PROTOCOL_VERSION, "1.0.0");
-    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MESSAGE, "firmwareVersion:2.1.0");
-    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MESSAGE, "deviceType:Radar");
-    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MESSAGE, "macAddress:" + getDeviceMacAddress());
+    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_FIRMWARE_VERSION, "2.1.0");
+    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_DEVICE_TYPE, "Radar");
+    String initMacAddress = getDeviceMacAddress();
+    if (initMacAddress.length() > 0) {
+        BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MAC_ADDRESS, initMacAddress);
+    }
     if (device_sn > 0) {
-        BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MESSAGE, "serialNumber:" + String(device_sn));
+        BleProto::appendTlvU64(deviceInfoFrame.data, BleProto::TLV_DEVICE_SN, device_sn);
     }
     
     // 编码为二进制并设置特征值
@@ -726,7 +735,7 @@ void radarCmdTask(void *parameter) {
  * @param parameter 任务参数（未使用）
  */
 void emotionAnalysisTask(void *parameter) {
-    physioProcessor = new PhysioDataProcessor();
+    // physioProcessor 已在 initAllTasks() 中初始化，这里只创建情绪分析器
     emotionAnalyzer = new SimpleEmotionAnalyzer(60);
 
     static unsigned long lastEmotionAnalysisTime = 0;
@@ -767,6 +776,11 @@ void emotionAnalysisTask(void *parameter) {
                     EmotionResult emotionResult = emotionAnalyzer->analyze(hrData, rrData, hrvData, movementData);
 
                     if (emotionResult.isValid) {
+                        // 更新全局缓存
+                        g_lastEmotionResult = emotionResult;
+                        g_hasEmotionResult = true;
+                        g_lastEmotionUpdateMs = millis();
+
                         Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                         Serial.printf("主要情绪:%s (置信度: %.1f%%);",
                             EMOTION_NAMES[emotionResult.primaryEmotion],
@@ -781,8 +795,17 @@ void emotionAnalysisTask(void *parameter) {
                         Serial.printf("放松水平:%.1f ", emotionResult.relaxationLevel);
                         Serial.printf("交感神经活动:%.2f ", emotionResult.sympatheticActivity);
                         Serial.printf("副交感神经活动:%.2f\n", emotionResult.parasympatheticActivity);
+                    } else {
+                        // 分析结果无效，清除缓存
+                        g_hasEmotionResult = false;
                     }
+                } else {
+                    // hr 和 rr 都为 0，清除缓存
+                    g_hasEmotionResult = false;
                 }
+            } else {
+                // 传感器数据无效，清除缓存
+                g_hasEmotionResult = false;
             }
         }
 
@@ -797,6 +820,10 @@ void emotionAnalysisTask(void *parameter) {
  */
 void initAllTasks() {
     loadDeviceSN();//加载设备序列号
+
+    // 提前初始化共享的生理数据处理器，避免 sleepAnalysisTask 和 emotionAnalysisTask 之间的初始化竞争
+    physioProcessor = new PhysioDataProcessor();
+
     xTaskCreate(bootButtonMonitorTask, "Boot Button Monitor Task", 2048, NULL, 1, NULL);//创建BOOT按钮监控任务
     xTaskCreate(ledControlTask, "LED Control Task", 2048, NULL, 1, NULL);//创建LED控制任务
     xTaskCreate(wifiMonitorTask, "WiFi Monitor Task", 4096, NULL, 2, NULL);//创建WiFi监控任务
