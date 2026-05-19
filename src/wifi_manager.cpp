@@ -225,26 +225,11 @@ bool WiFiManager::connectToNetwork(const char* ssid, const char* password) {
             Serial.println("🔧 [WiFi] 手动配置完成，WiFi重连机制已恢复");
         }
         
-        // 向蓝牙发送当前连接的WiFi配置信息
-        if (deviceConnected) {
-            sendWiFiConfigResultToBLE(BleProto::ErrorCode::SUCCESS, BleProto::State::SUCCESS, BleProto::Step::COMPLETED,
-                                      "WiFi连接成功", ssid, WiFi.localIP().toString());
-            Serial.printf("📱 [BLE] 发送WiFi连接成功信息: SSID=%s, IP=%s\n", 
-                         ssid, WiFi.localIP().toString().c_str());
-        }
-        
         return true;
     } else {
         Serial.println("❌ [WiFi] 连接超时");
         currentState = WIFI_DISCONNECTED;
         setNetworkStatus(NET_DISCONNECTED);
-        
-        // 向蓝牙发送连接失败信息
-        if (deviceConnected) {
-            sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_WRONG_PASSWORD, BleProto::State::FAILED, BleProto::Step::CONNECTING_AP,
-                                      "WiFi连接失败，请检查密码是否正确", ssid);
-            Serial.printf("📱 [BLE] 发送WiFi连接失败信息: SSID=%s\n", ssid);
-        }
         
         return false;
     }

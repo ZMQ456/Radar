@@ -53,7 +53,6 @@ extern void setNetworkStatus(NetworkStatus status);
 extern void clearStoredConfig();
 extern void loadDeviceSN();
 extern void saveDeviceId();
-extern uint32_t generateDeviceHash();
 extern std::string buildBLEManufacturerData();
 extern void refreshBLEAdvertisingData();
 extern String getDeviceMacAddress();

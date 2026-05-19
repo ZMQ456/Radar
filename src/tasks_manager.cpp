@@ -39,55 +39,11 @@ void loadDeviceSN() {
 
 /**
  * @brief 保存设备SN
- * 将设备SN保存到Flash中（支持64位雪花算法ID）
+ * 将设备SN保存到Flash中
  */
 void saveDeviceId() {
     preferences.putULong64("deviceSn", device_sn);//将设备SN保存到Flash中
     Serial.printf("设备SN已保存到Flash: %llu\n", device_sn);
-}
-
-/**
- * @brief 计算CRC32哈希值
- * @param data 输入数据指针
- * @param length 数据长度
- * @return CRC32哈希值
- */
-uint32_t calculateCRC32(const uint8_t* data, size_t length) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < length; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320 & -(crc & 1));
-        }
-    }
-    return ~crc;
-}
-
-/**
- * @brief 生成设备唯一标识哈希
- * 将 device_sn + MAC 地址拼接后计算 CRC32 哈希
- * @return 4字节哈希值
- */
-uint32_t generateDeviceHash() {
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-
-    char macHex[13];
-    snprintf(macHex, sizeof(macHex), "%02X%02X%02X%02X%02X%02X",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);//将MAC地址转换为十六进制字符串
-
-    char snStr[21];
-    snprintf(snStr, sizeof(snStr), "%llu", device_sn);//将设备SN转换为字符串
-
-    String hashInput = String("SN") + String(snStr) + String("|") + String(macHex);//将设备SN和MAC地址拼接为哈希输入
-
-    uint32_t hash = calculateCRC32((const uint8_t*)hashInput.c_str(), hashInput.length());//计算CRC32哈希值
-
-
-
-    Serial.printf("🔐 [HASH] 输入: %s, 哈希: 0x%08X\n", hashInput.c_str(), hash);
-
-    return hash;
 }
 
 /**
@@ -209,8 +165,8 @@ void updateDeviceInfo() {
 }
 
 /**
- * @brief 更新雷达状态特征
- * 更新低频状态信息，如持续发送状态、存在状态、工作状态等
+ * @brief 更新x,y,z坐标和存在状态的BLE特征
+ * 根据当前传感器数据更新雷达状态特征，包含存在状态、运动状态、距离和坐标等信息，以TLV格式发送给BLE客户端
  */
 void updateRadarStatus() {
     if (radarStatusCharacteristic == nullptr || !deviceConnected) {
@@ -224,31 +180,18 @@ void updateRadarStatus() {
     statusFrame.flags = 0;
     statusFrame.seq = 0;
     statusFrame.data.clear();
-    
-    // 添加状态信息TLV字段
-    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
-    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_STATE, BleProto::State::SUCCESS);
-    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_STEP, BleProto::Step::COMPLETED);
-    
-    // 持续发送状态
-    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_CONTINUOUS_ENABLE, continuousSendEnabled ? 1 : 0);
-    BleProto::appendTlvU16(statusFrame.data, BleProto::TLV_INTERVAL_MS, static_cast<uint16_t>(continuousSendInterval));
-    
-    // 传感器状态
-    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_PRESENCE, sensorData.presence);
-    bool sensorActive = (millis() - lastSensorUpdate < SENSOR_TIMEOUT);
-    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_SENSOR_ACTIVE, sensorActive ? 1 : 0);
-    
-    // WiFi连接状态
-    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_WIFI_CONNECTED, WiFi.status() == WL_CONNECTED ? 1 : 0);
-    if (WiFi.status() == WL_CONNECTED) {
-        BleProto::appendTlvString(statusFrame.data, BleProto::TLV_IP_ADDRESS, WiFi.localIP().toString());
-    }
+
+    BleProto::appendTlvU16(statusFrame.data, BleProto::TLV_DISTANCE_CM, sensorData.distance);// 距离
+    BleProto::appendTlvI16(statusFrame.data, BleProto::TLV_POS_X_MM, sensorData.pos_x);// X坐标
+    BleProto::appendTlvI16(statusFrame.data, BleProto::TLV_POS_Y_MM, sensorData.pos_y);// Y坐标
+    BleProto::appendTlvI16(statusFrame.data, BleProto::TLV_POS_Z_MM, sensorData.pos_z);// Z坐标
+    BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_BODY_MOVEMENT, sensorData.body_movement);// 身体运动状态
+
     
     // 编码TLV帧并设置到特征
     std::vector<uint8_t> frameData = BleProto::encodeFrame(statusFrame);
     radarStatusCharacteristic->setValue(frameData.data(), frameData.size());
-    radarStatusCharacteristic->notify();
+    radarStatusCharacteristic->notify();//通知BLE客户端更新状态
     
     Serial.printf("📊 [BLE] 雷达状态已更新为TLV格式，长度: %u 字节\n", static_cast<unsigned>(frameData.size()));
 }
@@ -636,7 +579,7 @@ void bleConfigTask(void *parameter) {
         BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MAC_ADDRESS, initMacAddress);
     }
     if (device_sn > 0) {
-        BleProto::appendTlvU64(deviceInfoFrame.data, BleProto::TLV_DEVICE_SN, device_sn);
+        BleProto::appendTlvU64(deviceInfoFrame.data, BleProto::TLV_DEVICE_SN, device_sn);//添加设备SN到TLV数据中
     }
     
     // 编码为二进制并设置特征值
@@ -646,13 +589,18 @@ void bleConfigTask(void *parameter) {
     Serial.printf("📋 [BLE] 设备信息特征已初始化为TLV格式, 长度=%u字节\n", 
                   static_cast<unsigned>(deviceInfoBinary.size()));
     
+    // 启动服务（必须在广播前调用）
+    radarDataService->start();
+    deviceConfigService->start();
+    Serial.println("✅ [BLE] 雷达数据服务和设备配置服务已启动");
+    
     refreshBLEAdvertisingData();//刷新BLE广播数据
     BLEDevice::startAdvertising();//启动BLE广播
 
     Serial.println(String("✅ BLE已启动，设备名称: ") + snName);
 
     static unsigned long lastRadarStatusUpdate = 0;
-    const unsigned long RADAR_STATUS_UPDATE_INTERVAL = 5000; // 每5秒更新一次雷达状态
+    const unsigned long RADAR_STATUS_UPDATE_INTERVAL = 1000; // 每1秒更新一次雷达状态
 
     while(1) {
         processBLEConfig();//处理BLE配置命令

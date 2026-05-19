@@ -132,6 +132,12 @@ void appendTlvU8(std::vector<uint8_t>& out, uint8_t type, uint8_t value) {
     out.push_back(value);//添加TLV值（8位无符号整数）
 }
 
+void appendTlvI8(std::vector<uint8_t>& out, uint8_t type, int8_t value) {
+    out.push_back(type);//添加TLV类型
+    appendU16(out, 1);//添加TLV长度（1字节）
+    out.push_back(static_cast<uint8_t>(value));//添加TLV值（8位有符号整数，底层补码相同）
+}
+
 void appendTlvU16(std::vector<uint8_t>& out, uint8_t type, uint16_t value) {
     out.push_back(type);//添加TLV类型
     appendU16(out, 2);//添加TLV长度（2字节）

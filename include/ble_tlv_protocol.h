@@ -75,6 +75,8 @@ enum TlvType : uint8_t {
     TLV_POS_X_MM = 0x16,//X坐标（mm）
     TLV_POS_Y_MM = 0x17,//Y坐标（mm）
     TLV_POS_Z_MM = 0x18,//Z坐标（mm）
+    TLV_BODY_MOVEMENT = 0x19, // 身体移动状态
+
 
     // --- WiFi 相关 (0x20-0x2F) ---
     TLV_SSID = 0x20,//SSID
@@ -85,9 +87,9 @@ enum TlvType : uint8_t {
     TLV_SECURITY = 0x25,//安全类型（uint8，见WifiSecurityType枚举）
 
     // --- 控制参数 (0x30-0x3F) ---
-    TLV_CONTINUOUS_ENABLE = 0x30,//持续发送开关 uint8
     TLV_INTERVAL_MS = 0x31,//间隔时间（毫秒）
-    TLV_SENSOR_ACTIVE = 0x32,//传感器活跃状态 uint8
+    
+
 
     // --- 通用消息 (0x40-0x4F) ---
     TLV_MESSAGE = 0x40,//消息
@@ -211,6 +213,7 @@ void appendBytes(std::vector<uint8_t>& out, const uint8_t* data, size_t len);//�
 void appendString(std::vector<uint8_t>& out, const String& s);//添加字符串
 
 void appendTlvU8(std::vector<uint8_t>& out, uint8_t type, uint8_t value);//添加8位无符号整数TLV
+void appendTlvI8(std::vector<uint8_t>& out, uint8_t type, int8_t value);//添加8位有符号整数TLV
 void appendTlvU16(std::vector<uint8_t>& out, uint8_t type, uint16_t value);//添加16位无符号整数TLV
 void appendTlvI16(std::vector<uint8_t>& out, uint8_t type, int16_t value);//添加16位有符号整数TLV
 void appendTlvU32(std::vector<uint8_t>& out, uint8_t type, uint32_t value);//添加32位无符号整数TLV

@@ -70,7 +70,7 @@ typedef struct { // 传感器数据结构体
     int heartbeat_waveform; // 心跳波形
     int breathing_waveform; // 呼吸波形
     uint16_t distance; // 距离
-    uint8_t body_movement; // 身体运动
+    uint8_t body_movement; // 身体运动（1~100）
     uint8_t breath_status; // 呼吸状态
     uint8_t sleep_state; // 睡眠状态
     uint32_t sleep_time; // 睡眠时长

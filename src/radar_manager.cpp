@@ -54,13 +54,13 @@ BLEServer* pServer = NULL; // BLE服务器指针
 // Radar Data Service
 BLEService* radarDataService = NULL;
 BLECharacteristic* radarStreamCharacteristic = NULL;
-BLECharacteristic* radarStatusCharacteristic = NULL;
+BLECharacteristic* radarStatusCharacteristic = NULL;// 雷达状态特征
 
 // Device Config Service
 BLEService* deviceConfigService = NULL;
-BLECharacteristic* deviceCommandCharacteristic = NULL;
-BLECharacteristic* deviceResultCharacteristic = NULL;
-BLECharacteristic* deviceInfoCharacteristic = NULL;
+BLECharacteristic* deviceCommandCharacteristic = NULL;// 设备命令特征
+BLECharacteristic* deviceResultCharacteristic = NULL;// 设备结果特征
+BLECharacteristic* deviceInfoCharacteristic = NULL;// 设备信息特征
 
 bool deviceConnected = false; // 设备连接状态
 bool oldDeviceConnected = false; // 旧设备连接状态
@@ -792,35 +792,28 @@ void bleSendTask(void *parameter) {
                     frame.seq = bleSequenceCounter++;// 设置序列号并自增
                     frame.data.clear();// 清空数据部分以准备添加新的TLV数据
                     
-                    // 添加时间戳
-                    BleProto::appendTlvU32(frame.data, BleProto::TLV_TIMESTAMP, currentTime);
                     
                     if (sensorData.presence > 0) {
                         // 有人存在时的完整数据
-                        BleProto::appendTlvU8(frame.data, BleProto::TLV_PRESENCE, sensorData.presence);
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_PRESENCE, sensorData.presence);// 存在状态
                         BleProto::appendTlvU16(frame.data, BleProto::TLV_HEART_RATE_X10, 
                                              static_cast<uint16_t>(sensorData.heart_rate * 10.0f + 0.5f));
                         BleProto::appendTlvU16(frame.data, BleProto::TLV_BREATH_RATE_X10, 
                                              static_cast<uint16_t>(sensorData.breath_rate * 10.0f + 0.5f));
-                        BleProto::appendTlvU8(frame.data, BleProto::TLV_MOTION, sensorData.motion);
-                        BleProto::appendTlvU8(frame.data, BleProto::TLV_SLEEP_STATE, sensorData.sleep_state);
-                        BleProto::appendTlvU16(frame.data, BleProto::TLV_DISTANCE_CM, sensorData.distance);
-                        BleProto::appendTlvI16(frame.data, BleProto::TLV_POS_X_MM, sensorData.pos_x);
-                        BleProto::appendTlvI16(frame.data, BleProto::TLV_POS_Y_MM, sensorData.pos_y);
-                        BleProto::appendTlvI16(frame.data, BleProto::TLV_POS_Z_MM, sensorData.pos_z);
+                        BleProto::appendTlvU8(frame.data, BleProto::TLV_MOTION, sensorData.motion);// 运动状态
+                        //BleProto::appendTlvU8(frame.data, BleProto::TLV_SLEEP_STATE, sensorData.sleep_state);
                         // 波形数据（取当前最新一点）
-                        BleProto::appendTlvU8(frame.data, BleProto::TLV_HEART_WAVEFORM,
-                                             static_cast<uint8_t>(static_cast<int8_t>(sensorData.heart_waveform[0]) + 128));
-                        BleProto::appendTlvU8(frame.data, BleProto::TLV_BREATH_WAVEFORM,
-                                             static_cast<uint8_t>(static_cast<int8_t>(sensorData.breath_waveform[0]) + 128));
+                        // BleProto::appendTlvU8(frame.data, BleProto::TLV_HEART_WAVEFORM,
+                        //                      static_cast<uint8_t>(static_cast<int8_t>(sensorData.heart_waveform[0]) + 128));
+                        // BleProto::appendTlvU8(frame.data, BleProto::TLV_BREATH_WAVEFORM,
+                        //                      static_cast<uint8_t>(static_cast<int8_t>(sensorData.breath_waveform[0]) + 128));
                     } else {
                         // 无人时的基础数据
                         BleProto::appendTlvU8(frame.data, BleProto::TLV_PRESENCE, 0);
                         BleProto::appendTlvU16(frame.data, BleProto::TLV_HEART_RATE_X10, 0);
                         BleProto::appendTlvU16(frame.data, BleProto::TLV_BREATH_RATE_X10, 0);
                         BleProto::appendTlvU8(frame.data, BleProto::TLV_MOTION, 0);
-                        BleProto::appendTlvU8(frame.data, BleProto::TLV_SLEEP_STATE, 0);
-                        BleProto::appendTlvU16(frame.data, BleProto::TLV_DISTANCE_CM, 0);
+                     //  BleProto::appendTlvU8(frame.data, BleProto::TLV_SLEEP_STATE, 0);
                     }
                     
                     // 发送TLV帧到雷达数据流特征
@@ -1510,15 +1503,22 @@ void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar) {
     const size_t maxPacketSize = g_blePayloadSize > 0 ? g_blePayloadSize : FALLBACK_PAYLOAD;
     size_t offset = 0;
 
-    while (offset < raw.size()) {//chunkLen：计算当前还剩多少字节，如果超过了 MTU 上限，就只切出 MTU 大小的一块
-        size_t chunkLen = min(maxPacketSize, raw.size() - offset);//setValue：将切出的这一块数据设置到 BLE 特征中，notify() 触发发送
-        pChar->setValue(raw.data() + offset, chunkLen); //先把货放在柜台上
-        pChar->notify();//2. 再按门铃告诉手机：“货更新了，快来拿！
-
-        /*
-          如果没有第二步 notify()：
-          即便你调用了一万次 setValue，手机端也不会收到任何通知，除非手机主动来读取（Read）这个特征值。
-        */
+    while (offset < raw.size()) {
+        size_t chunkLen = min(maxPacketSize, raw.size() - offset);//计算当前发送的包大小
+        
+        // 流控：等待可以发送的时机
+        int retryCount = 0;//重试次数
+        const int MAX_RETRIES = 100;//最大重试次数
+        while (!bleFlow.canSend(chunkLen) && retryCount < MAX_RETRIES) {//等待可以发送的时机
+            vTaskDelay(5 / portTICK_PERIOD_MS);
+            retryCount++;//重试次数增加
+        }
+        
+        pChar->setValue(raw.data() + offset, chunkLen);//设置当前发送的包值
+        pChar->notify();//通知客户端有新数据可读
+        
+        // 记录本次发送，更新流控计数器
+        bleFlow.recordSend(chunkLen);//记录本次发送的包大小
 
         offset += chunkLen;
         if (offset < raw.size()) {
@@ -1588,7 +1588,7 @@ bool processStartContinuousSend(const BleProto::Frame& frame) {
             }
         }
 
-        continuousSendInterval = reqInterval;
+        continuousSendInterval = reqInterval;// 使用请求的间隔，但要限制在合理范围内
         if (continuousSendInterval < 100) continuousSendInterval = 100;
         if (continuousSendInterval > 10000) continuousSendInterval = 10000;
         
@@ -1786,6 +1786,20 @@ bool processSetDeviceId(const BleProto::Frame& frame) {
 static void buildStatusPayload(BleProto::Frame& respFrame) {
     BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
     BleProto::appendTlvU16(respFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
+    
+    // 添加设备唯一标识（用于小程序绑定主键）
+    // 优先级：device_sn > MAC 地址
+    extern uint64_t device_sn;
+    extern String getDeviceMacAddress();
+    
+    if (device_sn > 0) {
+        BleProto::appendTlvU64(respFrame.data, BleProto::TLV_DEVICE_SN, device_sn);
+    } else {
+        String macAddr = getDeviceMacAddress();
+        macAddr.replace(":", "");
+        BleProto::appendTlvString(respFrame.data, BleProto::TLV_DEVICE_SN, macAddr);
+    }
+    
     BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONFIGURED, wifiManager.getSavedNetworkCount() > 0 ? 1 : 0);
     BleProto::appendTlvU8(respFrame.data, BleProto::TLV_WIFI_CONNECTED, WiFi.status() == WL_CONNECTED ? 1 : 0);
     if (WiFi.status() == WL_CONNECTED) {
@@ -1853,8 +1867,8 @@ bool processWiFiConfigCommand(const BleProto::Frame& frame) {
         }
     }
 
-    if (newSSID.length() == 0 || newPassword.length() == 0) {
-        Serial.println("❌ [BLE-WiFi] WiFi配置参数不完整");
+    if (newSSID.length() == 0) {
+        Serial.println("❌ [BLE-WiFi] SSID 不能为空");
         if (deviceConnected && deviceResultCharacteristic != nullptr) {
             BleProto::Frame respFrame;
             respFrame.version = BleProto::VERSION;
@@ -1864,7 +1878,7 @@ bool processWiFiConfigCommand(const BleProto::Frame& frame) {
             BleProto::appendTlvU8(respFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::ERR_PROTO_PARAM_MISSING);
             BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STATE, BleProto::State::FAILED);
             BleProto::appendTlvU8(respFrame.data, BleProto::TLV_STEP, BleProto::Step::RECEIVED);
-            BleProto::appendTlvString(respFrame.data, BleProto::TLV_ERROR_MESSAGE, "WiFi配置参数不完整");
+            BleProto::appendTlvString(respFrame.data, BleProto::TLV_ERROR_MESSAGE, "SSID 不能为空");
             sendFrameToBLE(respFrame, deviceResultCharacteristic);
         }
         return true;
@@ -2061,7 +2075,7 @@ void sendWiFiScanResultToBLE(uint8_t resultCode, uint8_t state, uint8_t step,
         for (const auto& network : networks) {
             std::vector<uint8_t> wifiItem;
             BleProto::appendTlvString(wifiItem, BleProto::TLV_SSID, network.ssid);// SSID作为一个独立的TLV项，放在wifiItem这个块里
-            BleProto::appendTlvU8(wifiItem, BleProto::TLV_RSSI, static_cast<uint8_t>(static_cast<int8_t>(network.rssi)));// RSSI也作为wifiItem块里的一个TLV项，注意要转换成无符号8位整数
+            BleProto::appendTlvI8(wifiItem, BleProto::TLV_RSSI, static_cast<int8_t>(network.rssi));// RSSI作为wifiItem块里的一个TLV项，使用int8类型直接传输负数
             BleProto::WifiSecurityType secType = BleProto::WIFI_SEC_UNKNOWN;// 安全类型同样作为wifiItem块里的一个TLV项，根据扫描结果中的security字符串来转换成协议定义的安全类型枚举值
             if (network.security == "OPEN") secType = BleProto::WIFI_SEC_OPEN;// 根据扫描结果中的security字符串来转换成协议定义的安全类型枚举值
             else if (network.security == "WEP") secType = BleProto::WIFI_SEC_WEP;
