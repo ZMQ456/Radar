@@ -28,7 +28,7 @@ struct WiFiScanResult {
  * 定义WiFi网络信号强度的最低要求，低于此值的网络会被过滤
  * 单位：dBm
  */
-#define MIN_RSSI_THRESHOLD -200
+#define MIN_RSSI_THRESHOLD -128
 
 /**
  * @brief WiFi连接超时时间
@@ -134,6 +134,7 @@ public:
     bool startScan(uint32_t timeoutMs = 30000);
     void scanAndSendResults();            // 扫描并发送结果
     bool addWiFiConfig(const char* ssid, const char* password); // 添加WiFi配置
+    bool removeWiFiConfig(const char* ssid, bool* existed = nullptr); // 删除指定WiFi配置
     void clearAllConfigs();               // 清除所有配置
     int getSavedNetworkCount();           // 获取已保存的网络数量
     void getSavedNetworks();            // 获取已保存的WiFi网络列表

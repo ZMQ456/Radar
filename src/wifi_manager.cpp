@@ -984,15 +984,181 @@ bool WiFiManager::addWiFiConfig(const char* ssid, const char* password) {
 }
 
 /**
- * @brief 清除所有WiFi配置
- * 删除所有保存的WiFi网络配置
+ * @brief 删除指定WiFi配置
+ * 根据SSID精确删除已保存的WiFi配置，并重新整理Flash中的索引
+ * 
+ * 行为约束：
+ * - 精确按 SSID 删除（大小写敏感）
+ * - 删除成功后如果当前连接的就是该 SSID，则立即断开
+ * - 删除失败时不修改内存和 Flash
+ * - 整个过程受 wifiMutex 保护，阻止重连逻辑并发访问
+ * 
+ * @param ssid 要删除的WiFi网络名称
+ * @param existed 输出参数，可选，表示删除前是否存在该SSID
+ * @return 是否删除成功（存在且持久化成功）
  */
-void WiFiManager::clearAllConfigs() {
+bool WiFiManager::removeWiFiConfig(const char* ssid, bool* existed) {
+    if (existed != nullptr) {
+        *existed = false;
+    }
+
+    // 参数校验
+    if (ssid == nullptr || strlen(ssid) == 0) {
+        Serial.println("❌ [WiFi] 删除失败：SSID 为空");
+        return false;
+    }
+
+    // 获取互斥锁，保护整个删除过程
+    if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("❌ [WiFi] 删除失败：无法获取互斥锁");
+        return false;
+    }
+
+    // 阻止重连逻辑继续使用当前列表
+    manualConfigActive = true;
+
+    // 查找目标 SSID
+    int removeIndex = -1;
+    for (int i = 0; i < savedNetworkCount; i++) {
+        if (strcmp(savedNetworks[i].ssid, ssid) == 0) {
+            removeIndex = i;
+            break;
+        }
+    }
+
+    // 未找到目标 SSID
+    if (removeIndex < 0) {
+        Serial.printf("⚠️ [WiFi] 未找到要删除的配置: %s\n", ssid);
+        manualConfigActive = false;
+        xSemaphoreGive(wifiMutex);
+        return false;
+    }
+
+    if (existed != nullptr) {
+        *existed = true;
+    }
+
+    // 判断是否删除当前连接中的 SSID
+    bool isCurrentConnectedTarget = false;
+    if (WiFi.status() == WL_CONNECTED) {
+        String currentSSID = WiFi.SSID();
+        if (currentSSID.equals(ssid)) {
+            isCurrentConnectedTarget = true;
+            Serial.printf("🔗 [WiFi] 删除的是当前连接的 WiFi: %s\n", ssid);
+        }
+    }
+
+    // 构造“删除后新列表”到临时数组（不直接改 savedNetworks）
+    WiFiConfig newConfigs[MAX_WIFI_NETWORKS];
+    int newCount = 0;
+    for (int i = 0; i < savedNetworkCount; i++) {
+        if (i != removeIndex) {
+            newConfigs[newCount] = savedNetworks[i];
+            newCount++;
+        }
+    }
+
+    // 先完整写 Flash，再提交内存
+    // 清空所有旧的 wifi_N 键
     for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
         String key = "wifi_" + String(i);
         preferences.remove(key.c_str());
     }
+
+    // 按新列表重写 Flash
+    bool persistSuccess = true;
+    for (int i = 0; i < newCount; i++) {
+        JsonDocument doc;
+        doc["ssid"] = newConfigs[i].ssid;
+        doc["password"] = newConfigs[i].password;
+
+        String configStr;
+        serializeJson(doc, configStr);
+
+        String key = "wifi_" + String(i);
+        if (preferences.putString(key.c_str(), configStr) == 0) {
+            Serial.printf("❌ [WiFi] 持久化失败: %s\n", newConfigs[i].ssid);
+            persistSuccess = false;
+            break;
+        }
+    }
+
+    // 如果持久化失败，不更新内存，直接返回
+    if (!persistSuccess) {
+        Serial.println("❌ [WiFi] 删除失败：持久化写入失败，内存未修改");
+        manualConfigActive = false;
+        xSemaphoreGive(wifiMutex);
+        return false;
+    }
+
+    // 持久化成功，提交内存状态
+    memcpy(savedNetworks, newConfigs, sizeof(WiFiConfig) * newCount);
+    savedNetworkCount = newCount;
+    // 清空尾部剩余项
+    for (int i = newCount; i < MAX_WIFI_NETWORKS; i++) {
+        memset(&savedNetworks[i], 0, sizeof(WiFiConfig));
+    }
+
+    // 如果删的是当前连接 WiFi，立即断开
+    if (isCurrentConnectedTarget) {
+        Serial.printf("🔌 [WiFi] 断开当前连接: %s\n", ssid);
+        WiFi.disconnect(false);
+        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            currentState = WIFI_DISCONNECTED;
+            setNetworkStatus(NET_DISCONNECTED);
+            xSemaphoreGive(stateMutex);
+        }
+    }
+
+    // 恢复自动重连
+    manualConfigActive = false;
+    xSemaphoreGive(wifiMutex);
+
+    Serial.printf("🗑️ [WiFi] 已删除配置: %s，剩余 %d 个%s\n", 
+                  ssid, savedNetworkCount, 
+                  isCurrentConnectedTarget ? "（已断开连接）" : "");
+    return true;
+}
+
+/**
+ * @brief 清除所有WiFi配置
+ * 删除所有保存的WiFi网络配置，受互斥锁保护
+ */
+void WiFiManager::clearAllConfigs() {
+    // 获取互斥锁
+    if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("❌ [WiFi] 清空失败：无法获取互斥锁");
+        return;
+    }
+
+    // 阻止重连逻辑
+    manualConfigActive = true;
+
+    // 清空 Flash
+    for (int i = 0; i < MAX_WIFI_NETWORKS; i++) {
+        String key = "wifi_" + String(i);
+        preferences.remove(key.c_str());
+    }
+
+    // 清空内存
     savedNetworkCount = 0;
+    memset(savedNetworks, 0, sizeof(savedNetworks));
+
+    // 断开当前连接（如果连接的是保存的网络）
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("🔌 [WiFi] 断开当前连接");
+        WiFi.disconnect(false);
+        if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            currentState = WIFI_DISCONNECTED;
+            setNetworkStatus(NET_DISCONNECTED);
+            xSemaphoreGive(stateMutex);
+        }
+    }
+
+    // 恢复自动重连
+    manualConfigActive = false;
+    xSemaphoreGive(wifiMutex);
+
     Serial.println("🗑️ 已清除所有WiFi配置");
 }
 

@@ -173,9 +173,20 @@ extern HardwareSerial mySerial1; // 硬件串口1
 extern QueueHandle_t phaseDataQueue; // 相位数据队列
 extern QueueHandle_t vitalDataQueue; // 生命体征数据队列
 extern QueueHandle_t uartQueue; // UART数据队列
+
+/**
+ * @brief BLE命令消息结构
+ * 
+ * 用于在 onWrite 回调和命令处理任务之间传递命令数据。
+ * 
+ * 限制：
+ * - raw 缓冲区固定 256 字节
+ * - 如果客户端发送超过 256 字节的命令，固件会拒绝并返回 ERR_PROTO_FRAME_TOO_LARGE 错误
+ * - 不会静默截断，避免后续 CRC 错误或解析失败
+ */
 typedef struct {
-    uint8_t raw[256];// 原始数据缓冲区
-    size_t len;
+    uint8_t raw[256];// 原始数据缓冲区（最大 256 字节）
+    size_t len;      // 实际数据长度
 } BleCommandMessage;
 
 extern TaskHandle_t bleSendTaskHandle; // BLE发送任务句柄
@@ -202,19 +213,30 @@ extern uint8_t bleSequenceCounter; // BLE序列号计数器
 extern QueueHandle_t bleCommandQueue; // BLE命令队列
 
 /*
-   * Opcode (1字节)：告诉对方这是什么操作（比如：这是一个通知 Notify，还是一个写请求 Write）。
-   * Attribute Handle (2字节)：告诉对方这个数据是属于哪个特征值（Characteristic）的“地址”，对方可以根据这个地址知道这个数据是什么含义。
-*/
+ * BLE 分包模式开关
+ *
+ * BLE_FIXED_20_BYTE_MODE = 1 (当前)：
+ *   固定 20 字节分包，兼容所有 Android/iOS 小程序，不依赖 MTU 协商。
+ *   适合配网、状态上报等场景，吞吐低但稳定。
+ *
+ * BLE_FIXED_20_BYTE_MODE = 0 (未来优化)：
+ *   启用 MTU 协商，协商成功后使用 TARGET_ATT_MTU - ATT_HEADER_SIZE 作为分包大小。
+ *   需要小程序端同步支持 setBLEMTU，且经过 Android/iOS 双端验证后再切换。
+ *
+ * 切换方式：将下面的 1 改为 0 即可，所有相关代码已通过条件编译自动切换。
+ */
+#define BLE_FIXED_20_BYTE_MODE 1
 
-// BLE MTU 协商相关常量和变量
-static constexpr uint16_t DEFAULT_ATT_MTU = 23;// BLE默认ATT MTU大小
-static constexpr uint16_t TARGET_ATT_MTU  = 247; // 目标ATT MTU大小，ESP32的BLE库支持最大247字节的ATT MTU，这里设置为247以获得最大的有效载荷空间
-static constexpr size_t ATT_HEADER_SIZE   = 3; // ATT协议头部大小（opcode 1字节 + handle 2字节）
-static constexpr size_t FALLBACK_PAYLOAD  = 20; // 在MTU协商失败时的回退有效载荷大小，考虑到BLE协议的开销，设置为20字节以确保兼容性
+// BLE MTU 协商相关常量
+static constexpr uint16_t DEFAULT_ATT_MTU = 23;   // BLE 默认 ATT MTU
+static constexpr uint16_t TARGET_ATT_MTU  = 247;  // 目标 ATT MTU（ESP32 BLE 库上限）
+static constexpr size_t   ATT_HEADER_SIZE = 3;    // ATT 头部（opcode 1B + handle 2B）
+static constexpr size_t   FALLBACK_PAYLOAD = 20;  // 固定兼容模式分包大小
 
-extern size_t g_blePayloadSize;  // 全局BLE有效载荷大小，根据MTU协商结果动态调整，默认为FALLBACK_PAYLOAD，在协商成功后更新为TARGET_ATT_MTU - ATT_HEADER_SIZE
+extern size_t g_blePayloadSize;  // 全局BLE有效载荷大小（当前固定为 FALLBACK_PAYLOAD）
 extern bool continuousSendEnabled; // 持续发送使能标志
 extern unsigned long continuousSendInterval; // 持续发送间隔
+extern bool radarSleepQueryEnabled;   // 雷达睡眠/综合状态查询开关（0x8D/0x90）
 extern unsigned long lastSleepDataTime; // 上次发送睡眠数据时间
 extern BLEFlowController bleFlow; // BLE流控制器
 extern unsigned long lastSensorUpdate; // 上次传感器更新时间
@@ -252,19 +274,43 @@ void uartProcessTask(void *parameter);// UART处理任务函数
 
 // ---- BLE 数据发送接口 ----
 void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar);
-void sendStatusToBLE();
 void sendRawEchoResponse(const String& rawData);
 
+// ---- BLE 统一错误响应函数 ----
+/**
+ * @brief 发送即时命令错误响应
+ * 用于一问一答的即时命令失败场景，不包含 TLV_STATE/TLV_STEP
+ * @param respCmd 响应命令码（如 CMD_QUERY_STATUS）
+ * @param seq 请求的序列号
+ * @param resultCode 错误码（如 ERR_PROTO_PARAM_INVALID）
+ * @param errorMessage 错误详细说明（可选）
+ */
+void sendCommandErrorResponse(uint8_t respCmd, uint8_t seq, uint8_t resultCode, const char* errorMessage = nullptr);
+
+/**
+ * @brief 发送异步流程状态响应
+ * 用于多阶段异步流程（如 WiFi 配网、扫描），包含 TLV_STATE/TLV_STEP
+ * @param respCmd 响应命令码（如 CMD_WIFI_CONFIG）
+ * @param seq 请求的序列号
+ * @param resultCode 结果码（SUCCESS 或 ERR_XXX）
+ * @param state 流程状态（PROCESSING/SUCCESS/FAILED）
+ * @param step 当前步骤（RECEIVED/SCANNING/CONNECTING 等）
+ * @param errorMessage 错误详细说明（可选）
+ */
+void sendAsyncStateResponse(uint8_t respCmd, uint8_t seq, uint8_t resultCode, uint8_t state, uint8_t step, const char* errorMessage = nullptr);
+
 // ---- BLE 命令处理函数 (被 processBLEConfig 分派) ----
-bool processEchoRequest(const BleProto::Frame& frame);         // CMD_PING_REQ (0x01)
-bool processQueryStatus(const BleProto::Frame& frame);         // CMD_QUERY_STATUS_REQ (0x10)
-bool processQueryRadarData(const BleProto::Frame& frame);      // CMD_QUERY_RADAR_REQ (0x12)
-bool processStartContinuousSend(const BleProto::Frame& frame); // CMD_START_CONTINUOUS_REQ (0x14)
-bool processStopContinuousSend(const BleProto::Frame& frame);  // CMD_STOP_CONTINUOUS_REQ (0x16)
-bool processSetDeviceId(const BleProto::Frame& frame);         // CMD_SET_DEVICE_ID_REQ (0x30)
-bool processWiFiConfigCommand(const BleProto::Frame& frame);   // CMD_WIFI_CONFIG_REQ (0x22)
-bool processScanWiFi(const BleProto::Frame& frame);            // CMD_WIFI_SCAN_REQ (0x20)
-bool processGetSavedNetworks(const BleProto::Frame& frame);    // CMD_GET_SAVED_WIFI_REQ (0x24)
+bool processEchoRequest(const BleProto::Frame& frame);         // CMD_PING (0x01)
+bool processQueryStatus(const BleProto::Frame& frame);         // CMD_QUERY_STATUS (0x10)
+bool processQueryRadarData(const BleProto::Frame& frame);      // CMD_QUERY_RADAR (0x12)
+bool processStartContinuousSend(const BleProto::Frame& frame); // CMD_START_CONTINUOUS (0x14)
+bool processStopContinuousSend(const BleProto::Frame& frame);  // CMD_STOP_CONTINUOUS (0x16)
+bool processSetDeviceId(const BleProto::Frame& frame);         // CMD_SET_DEVICE_ID (0x30)
+bool processWiFiConfigCommand(const BleProto::Frame& frame);   // CMD_WIFI_CONFIG (0x22)
+bool processScanWiFi(const BleProto::Frame& frame);            // CMD_WIFI_SCAN (0x20)
+bool processGetSavedNetworks(const BleProto::Frame& frame);    // CMD_GET_SAVED_WIFI (0x24)
+bool processDeleteSavedNetwork(const BleProto::Frame& frame);  // CMD_DELETE_SAVED_WIFI (0x26)
+bool processRadarSleepQuery(const BleProto::Frame& frame);  // CMD_RADAR_SLEEP_QUERY (0x17)
 void processBLEConfig();                                        // 主分派入口
 
 // ---- WiFi 异步结果推送 (纯TLV) ----

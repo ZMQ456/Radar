@@ -12,44 +12,48 @@ static const uint8_t SOF2 = 0x55;//帧头
 static const uint8_t VERSION = 0x01;//协议版本
 
 // flags
-static const uint8_t FLAG_FRAGMENT = 0x01;//是否为分片
-static const uint8_t FLAG_NEED_ACK = 0x02;//发送方说：这个包很重要，你收到了必须回我一个确认（ACK），否则我会一直重发
-static const uint8_t FLAG_IS_ACK = 0x04;//用于回复上面的 FLAG_NEED_ACK.它告诉对方:你刚才发给我的那个 seq 为 X 的包，我已经稳稳收到了
-static const uint8_t FLAG_IS_ERROR = 0x08;//是否为错误
+static const uint8_t FLAG_NONE = 0x00;       // 无标志位（正常响应）
+static const uint8_t FLAG_FRAGMENT = 0x01;   // 是否为分片（没）
+static const uint8_t FLAG_NEED_ACK = 0x02;   // 需要ACK确认（没）
+static const uint8_t FLAG_IS_ACK = 0x04;     // 是ACK确认包（没）
+static const uint8_t FLAG_IS_ERROR = 0x08;   // 是否为错误
 
 // ==================== 命令码定义 ====================
 // 范围分配：系统 0x01-0x0F | 雷达/传感器 0x10-0x1F | WiFi 0x20-0x2F | 设备 0x30-0x3F | 通用 0x7E-0x7F
+//
+// 设计规则：
+// - 一问一答命令：REQ 和 RESP 共用同一个命令码，方向由 GATT 通道区分
+//   客户端写 b1（CMD_XXX）→ 设备 notify b2（CMD_XXX，seq 原样返回）
+// - 主动推送命令：保留独立命令码，不与请求响应复用
+//   原因：主动推送不由请求触发，seq 不是请求 seq，客户端不能按 seq 匹配
 enum Command : uint8_t {
-    // --- 系统命令 ---
-    CMD_PING_REQ = 0x01,//Ping请求
-    CMD_PING_RESP = 0x02,//Ping响应
+    // --- 系统命令（一问一答）---
+    CMD_PING = 0x01,                  // Ping 请求/响应（合并）
 
-    // --- 雷达/传感器命令 ---
-    CMD_QUERY_STATUS_REQ = 0x10,//查询状态请求
-    CMD_STATUS_RESP = 0x11,//状态响应
-    CMD_QUERY_RADAR_REQ = 0x12,//查询雷达请求
-    CMD_RADAR_RESP = 0x13,//雷达响应
-    CMD_START_CONTINUOUS_REQ = 0x14,//启动连续请求
-    CMD_START_CONTINUOUS_RESP = 0x15,//启动连续响应
-    CMD_STOP_CONTINUOUS_REQ = 0x16,//停止连续请求
-    CMD_STOP_CONTINUOUS_RESP = 0x17,//停止连续响应
-    CMD_CONTINUOUS_PUSH = 0x18,//连续推送
+    // --- 雷达/传感器命令（一问一答）---
+    CMD_QUERY_STATUS = 0x10,          // 查询设备状态 请求/响应（合并）
+    CMD_QUERY_RADAR = 0x12,           // 查询雷达数据 请求/响应（合并）
+    CMD_START_CONTINUOUS = 0x14,      // 启动连续推送 请求/响应（合并）
+    CMD_STOP_CONTINUOUS = 0x16,       // 停止连续推送 请求/响应（合并）
+    CMD_RADAR_SLEEP_QUERY = 0x17,     // 雷达睡眠/综合状态查询开关 请求/响应（合并）
+    
+    // --- 主动推送命令（独立命令码，不与请求响应复用）---
+    CMD_CONTINUOUS_PUSH = 0x18,       // 连续数据主动推送（a1 通道）
+    CMD_DEVICE_INFO_PUSH = 0x19,      // 设备信息主动推送（b3 通道）
+    CMD_RADAR_STATUS_PUSH = 0x1A,     // 雷达状态主动推送（a2 通道）
 
-    // --- WiFi 命令 ---
-    CMD_WIFI_SCAN_REQ = 0x20,//WiFi扫描请求
-    CMD_WIFI_SCAN_RESP = 0x21,//WiFi扫描响应
-    CMD_WIFI_CONFIG_REQ = 0x22,//WiFi配置请求
-    CMD_WIFI_CONFIG_RESP = 0x23,//WiFi配置响应
-    CMD_GET_SAVED_WIFI_REQ = 0x24,//获取保存的WiFi请求
-    CMD_GET_SAVED_WIFI_RESP = 0x25,//获取保存的WiFi响应
+    // --- WiFi 命令（一问一答）---
+    CMD_WIFI_SCAN = 0x20,             // WiFi 扫描 请求/响应（合并）
+    CMD_WIFI_CONFIG = 0x22,           // WiFi 配置 请求/响应（合并）
+    CMD_GET_SAVED_WIFI = 0x24,        // 获取已保存 WiFi 请求/响应（合并）
+    CMD_DELETE_SAVED_WIFI = 0x26,     // 删除指定已保存 WiFi 请求/响应（合并）
 
-    // --- 设备配置命令 ---
-    CMD_SET_DEVICE_ID_REQ = 0x30,//设置设备ID请求
-    CMD_SET_DEVICE_ID_RESP = 0x31,//设置设备ID响应
+    // --- 设备配置命令（一问一答）---
+    CMD_SET_DEVICE_ID = 0x30,         // 设置设备 ID 请求/响应（合并）
 
     // --- 通用命令 ---
-    CMD_ERROR_RESP = 0x7E,//错误响应
-    CMD_ACK = 0x7F//确认
+    CMD_ERROR_RESP = 0x7E,            // 协议层错误响应（无对应请求）
+    CMD_ACK = 0x7F                    // 确认（无对应请求）
 };
 
 // ==================== TLV 类型码定义 ====================
@@ -60,7 +64,7 @@ enum TlvType : uint8_t {
     TLV_ERROR_MESSAGE = 0x03,//错误信息
     TLV_TIMESTAMP = 0x04,//时间戳
     TLV_PROTOCOL_VERSION = 0x05,//协议版本
-    TLV_DEVICE_SN = 0x06,//设备序列号 uint64
+    TLV_DEVICE_SN = 0x06,//设备序列号 uint64（仅当存在时发送，不用 MAC 替代）
     TLV_FIRMWARE_VERSION = 0x07,//固件版本 string
     TLV_DEVICE_TYPE = 0x08,//设备类型 string
     TLV_MAC_ADDRESS = 0x09,//MAC地址 string
@@ -87,7 +91,8 @@ enum TlvType : uint8_t {
     TLV_SECURITY = 0x25,//安全类型（uint8，见WifiSecurityType枚举）
 
     // --- 控制参数 (0x30-0x3F) ---
-    TLV_INTERVAL_MS = 0x31,//间隔时间（毫秒）
+    TLV_INTERVAL_MS = 0x31,           // 间隔时间（毫秒）
+    TLV_RADAR_SLEEP_ENABLED = 0x32,   // 雷达睡眠查询开关 uint8（0=关闭，1=开启）
     
 
 
@@ -97,13 +102,21 @@ enum TlvType : uint8_t {
     TLV_WIFI_CONFIGURED = 0x42,//WiFi配置
     TLV_WIFI_CONNECTED = 0x43,//WiFi连接
     TLV_ECHO_CONTENT = 0x44,//回显内容
-    TLV_STATE = 0x45,//状态 uint8
-    TLV_STEP = 0x46,//步骤 uint8
-    TLV_REASON = 0x47,//原因码 uint8
+    
+    // --- 异步流程状态字段（仅用于多阶段流程，如 WiFi 配网/扫描）---
+    // 使用规则：
+    // - 即时命令响应：只用 TLV_RESULT_CODE，错误时加 FLAG_IS_ERROR 和可选 TLV_ERROR_MESSAGE
+    // - 异步多阶段流程：保留 TLV_STATE/TLV_STEP/TLV_REASON（如 WiFi 配网、扫描）
+    // - 主动推送/普通数据响应：通常只需 TLV_RESULT_CODE = SUCCESS，甚至可省略
+    TLV_STATE = 0x45,//状态 uint8（仅用于异步流程，如 PROCESSING/SUCCESS/FAILED）
+    TLV_STEP = 0x46,//步骤 uint8（仅用于异步流程，如 RECEIVED/SCANNING/CONNECTING）
+    TLV_REASON = 0x47,//原因码 uint8（仅用于异步流程失败原因）
 
     // --- 波形数据 (0x60-0x6F) ---
     TLV_HEART_WAVEFORM = 0x60,  // 心跳波形 uint8, 原始int8+128偏移
     TLV_BREATH_WAVEFORM = 0x61, // 呼吸波形 uint8, 原始int8+128偏移
+
+    
 };
 
 // 分层分域错误码定义 (高4位=模块，低4位=具体错误)
@@ -111,47 +124,25 @@ namespace ErrorCode {
     // 通用状态 (0x0_)
     constexpr uint8_t SUCCESS = 0x00;              // 成功
     constexpr uint8_t PROCESSING = 0x01;           // 已接收，处理中
-    constexpr uint8_t PARTIAL_SUCCESS = 0x02;      // 部分成功
-    constexpr uint8_t UNKNOWN = 0x0F;              // 未知结果
     
     // 协议层错误 (0x1_)
-    constexpr uint8_t ERR_PROTO_CRC_FAIL = 0x10;       // CRC校验失败
-    constexpr uint8_t ERR_PROTO_FRAME_INVALID = 0x11;  // 帧格式错误
-    constexpr uint8_t ERR_PROTO_LEN_INVALID = 0x12;    // 长度非法
     constexpr uint8_t ERR_PROTO_CMD_UNKNOWN = 0x13;    // 未知命令
     constexpr uint8_t ERR_PROTO_PARAM_MISSING = 0x14;  // 缺少参数
     constexpr uint8_t ERR_PROTO_PARAM_INVALID = 0x15;  // 参数非法
     constexpr uint8_t ERR_PROTO_BUSY = 0x16;           // 设备忙
-    constexpr uint8_t ERR_PROTO_TIMEOUT = 0x17;       // 协议处理超时
+    constexpr uint8_t ERR_PROTO_FRAME_TOO_LARGE = 0x18; // 命令帧过大（超过缓冲区限制）
     
     // WiFi错误 (0x2_)
     constexpr uint8_t ERR_WIFI_SCAN_TIMEOUT = 0x20;      // 扫描超时
     constexpr uint8_t ERR_WIFI_SSID_NOT_FOUND = 0x21;    // 找不到SSID
     constexpr uint8_t ERR_WIFI_WRONG_PASSWORD = 0x22;    // 密码错误
-    constexpr uint8_t ERR_WIFI_CONNECT_TIMEOUT = 0x23;   // 连接AP超时
-    constexpr uint8_t ERR_WIFI_IP_TIMEOUT = 0x24;        // 获取IP超时
     constexpr uint8_t ERR_WIFI_SIGNAL_WEAK = 0x25;       // 信号太弱
     constexpr uint8_t ERR_WIFI_BUSY = 0x26;              // WiFi正在被其他操作占用
-    constexpr uint8_t ERR_WIFI_DISCONNECTED = 0x27;      // 连接过程被断开
-    
-    // 雷达错误 (0x3_)
-    constexpr uint8_t ERR_RADAR_NO_DATA = 0x30;          // 无数据
-    constexpr uint8_t ERR_RADAR_UART_TIMEOUT = 0x31;     // UART超时
-    constexpr uint8_t ERR_RADAR_FRAME_INVALID = 0x32;    // 雷达帧异常
-    constexpr uint8_t ERR_RADAR_HW_FAULT = 0x33;         // 硬件故障
-    constexpr uint8_t ERR_RADAR_NOT_READY = 0x34;        // 雷达未就绪
     
     // 设备/状态错误 (0x4_)
     constexpr uint8_t ERR_DEV_STATE_INVALID = 0x40;      // 当前状态不允许
     constexpr uint8_t ERR_DEV_STORAGE_FAIL = 0x41;       // 存储失败
     constexpr uint8_t ERR_DEV_QUEUE_FULL = 0x42;         // 队列已满
-    constexpr uint8_t ERR_DEV_NO_MEMORY = 0x43;          // 内存不足
-    constexpr uint8_t ERR_DEV_NOT_CONNECTED = 0x44;      // 设备未连接
-    
-    // 云端/网络错误 (0x5_)
-    constexpr uint8_t ERR_CLOUD_MQTT_FAIL = 0x50;        // MQTT失败
-    constexpr uint8_t ERR_CLOUD_HTTP_FAIL = 0x51;        // HTTP失败
-    constexpr uint8_t ERR_CLOUD_UPLOAD_TIMEOUT = 0x52;   // 上传超时
 }
 
 // 状态枚举
@@ -164,11 +155,9 @@ namespace State {
 
 // 步骤枚举
 namespace Step {
-    constexpr uint8_t NONE = 0x00;           // 无
     constexpr uint8_t RECEIVED = 0x01;       // 已接收
     constexpr uint8_t SCANNING = 0x02;       // 扫描中
     constexpr uint8_t CONNECTING_AP = 0x03;  // 连接AP
-    constexpr uint8_t REQUESTING_IP = 0x04;  // 请求IP
     constexpr uint8_t COMPLETED = 0x05;      // 完成
 }
 

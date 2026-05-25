@@ -30,7 +30,8 @@ bool forceLedOff = false;//是否强制关闭LED
 
 /**
  * @brief 加载设备SN
- * 从Flash中读取保存的设备SN（支持64位雪花算法ID）
+ * 从Flash中读取保存的设备SN，如果没有则保持为0
+ * 设备SN用于MQTT设备标识和BLE广播，优先使用SN作为设备标识，如果SN为0则使用MAC地址作为设备标识
  */
 void loadDeviceSN() {
     device_sn = preferences.getULong64("deviceSn", 0);
@@ -127,6 +128,7 @@ String getDeviceMacAddress() {
 /**
  * @brief 更新设备信息特征
  * 当设备ID或其他静态信息变化时更新设备信息特征
+ * 通过 b3 (DEVICE_INFO_CHAR_UUID) notify 通道分包发送
  */
 void updateDeviceInfo() {
     if (deviceInfoCharacteristic == nullptr) {
@@ -136,7 +138,7 @@ void updateDeviceInfo() {
     // 构造设备信息TLV帧
     BleProto::Frame infoFrame;
     infoFrame.version = BleProto::VERSION;
-    infoFrame.cmd = BleProto::CMD_STATUS_RESP;
+    infoFrame.cmd = BleProto::CMD_DEVICE_INFO_PUSH;  // 主动推送设备信息
     infoFrame.flags = 0;
     infoFrame.seq = 0;
     infoFrame.data.clear();
@@ -157,16 +159,22 @@ void updateDeviceInfo() {
         BleProto::appendTlvU64(infoFrame.data, BleProto::TLV_DEVICE_SN, device_sn);
     }
     
-    // 编码TLV帧并设置到特征
+    // 编码TLV帧
     std::vector<uint8_t> frameData = BleProto::encodeFrame(infoFrame);
-    deviceInfoCharacteristic->setValue(frameData.data(), frameData.size());
     
-    Serial.printf("📋 [BLE] 设备信息已更新为TLV格式，长度: %u 字节\n", static_cast<unsigned>(frameData.size()));
+    // 通过 notify 分包发送（b3 仅支持 NOTIFY，不支持 READ）
+    if (deviceConnected) {
+        sendFrameToBLE(infoFrame, deviceInfoCharacteristic);
+        Serial.printf("📋 [BLE] 设备信息已通过 b3 notify 发送，长度: %u 字节\n", static_cast<unsigned>(frameData.size()));
+    } else {
+        Serial.printf("📋 [BLE] 设备信息帧已构建，长度: %u 字节（等待连接后 notify）\n", static_cast<unsigned>(frameData.size()));
+    }
 }
 
 /**
  * @brief 更新x,y,z坐标和存在状态的BLE特征
  * 根据当前传感器数据更新雷达状态特征，包含存在状态、运动状态、距离和坐标等信息，以TLV格式发送给BLE客户端
+ * 通过 a2 (RADAR_STATUS_CHAR_UUID) notify 通道分包发送
  */
 void updateRadarStatus() {
     if (radarStatusCharacteristic == nullptr || !deviceConnected) {
@@ -176,7 +184,7 @@ void updateRadarStatus() {
     // 构造雷达状态TLV帧
     BleProto::Frame statusFrame;
     statusFrame.version = BleProto::VERSION;
-    statusFrame.cmd = BleProto::CMD_STATUS_RESP;
+    statusFrame.cmd = BleProto::CMD_RADAR_STATUS_PUSH;  // 主动推送雷达状态
     statusFrame.flags = 0;
     statusFrame.seq = 0;
     statusFrame.data.clear();
@@ -187,13 +195,11 @@ void updateRadarStatus() {
     BleProto::appendTlvI16(statusFrame.data, BleProto::TLV_POS_Z_MM, sensorData.pos_z);// Z坐标
     BleProto::appendTlvU8(statusFrame.data, BleProto::TLV_BODY_MOVEMENT, sensorData.body_movement);// 身体运动状态
 
+    // 通过 a2 notify 分包发送
+    sendFrameToBLE(statusFrame, radarStatusCharacteristic);
     
-    // 编码TLV帧并设置到特征
-    std::vector<uint8_t> frameData = BleProto::encodeFrame(statusFrame);
-    radarStatusCharacteristic->setValue(frameData.data(), frameData.size());
-    radarStatusCharacteristic->notify();//通知BLE客户端更新状态
-    
-    Serial.printf("📊 [BLE] 雷达状态已更新为TLV格式，长度: %u 字节\n", static_cast<unsigned>(frameData.size()));
+    Serial.printf("📊 [BLE] 雷达状态已通过 a2 notify 发送，长度: %u 字节\n", 
+                  static_cast<unsigned>(BleProto::encodeFrame(statusFrame).size()));
 }
 
 /**
@@ -235,7 +241,7 @@ void clearStoredConfig() {
     Serial.println("🔄 已清除Flash与内存中的配置，请重新配置WiFi和设备ID");
 
     if (deviceConnected) {
-        sendStatusToBLE();//发送状态到BLE
+        updateDeviceInfo();  // b3: 设备信息推送（替代已废弃的 sendStatusToBLE）
     }
 }
 
@@ -518,8 +524,13 @@ void bleConfigTask(void *parameter) {
         snprintf(snName, sizeof(snName), "Radar_%s", macAddr.c_str());//设置设备名称为Radar_设备地址
     }
     BLEDevice::init(snName);//初始化BLE设备
-    BLEDevice::setMTU(TARGET_ATT_MTU);
+#if BLE_FIXED_20_BYTE_MODE
+    // 固定 20 字节兼容模式：不发起 MTU 协商
+    Serial.println("[BLE] 固定 20 字节兼容模式，跳过 MTU 协商");
+#else
+    BLEDevice::setMTU(TARGET_ATT_MTU);//设置目标MTU值，ESP32会尝试与客户端协商一个合适的MTU大小
     Serial.printf("[BLE] 请求目标 MTU: %u\n", TARGET_ATT_MTU);
+#endif
     
     pServer = BLEDevice::createServer();//创建BLE服务器
     pServer->setCallbacks(new MyServerCallbacks());//设置BLE服务器回调函数
@@ -537,8 +548,7 @@ void bleConfigTask(void *parameter) {
 
     radarStatusCharacteristic = radarDataService->createCharacteristic(
         RADAR_STATUS_CHAR_UUID,
-        BLECharacteristic::PROPERTY_READ |
-        BLECharacteristic::PROPERTY_NOTIFY
+        BLECharacteristic::PROPERTY_NOTIFY  // a2 仅支持 NOTIFY
     );
     radarStatusCharacteristic->addDescriptor(new BLE2902());
 
@@ -556,38 +566,10 @@ void bleConfigTask(void *parameter) {
     deviceResultCharacteristic->addDescriptor(new BLE2902());
 
     deviceInfoCharacteristic = deviceConfigService->createCharacteristic(
-        DEVICE_INFO_CHAR_UUID,
-        BLECharacteristic::PROPERTY_READ
+               DEVICE_INFO_CHAR_UUID,
+        BLECharacteristic::PROPERTY_NOTIFY  // b3 仅支持 NOTIFY
     );
-
-    // 初始化设备信息特征 - 纯TLV格式静态信息
-    BleProto::Frame deviceInfoFrame;
-    deviceInfoFrame.version = BleProto::VERSION;
-    deviceInfoFrame.cmd = BleProto::CMD_STATUS_RESP;
-    deviceInfoFrame.flags = 0;
-    deviceInfoFrame.seq = 0;
-    deviceInfoFrame.data.clear();
-    
-    // 添加设备信息TLV字段（与 updateDeviceInfo() 保持一致）
-    BleProto::appendTlvU8(deviceInfoFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
-    BleProto::appendTlvU16(deviceInfoFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
-    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_PROTOCOL_VERSION, "1.0.0");
-    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_FIRMWARE_VERSION, "2.1.0");
-    BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_DEVICE_TYPE, "Radar");
-    String initMacAddress = getDeviceMacAddress();
-    if (initMacAddress.length() > 0) {
-        BleProto::appendTlvString(deviceInfoFrame.data, BleProto::TLV_MAC_ADDRESS, initMacAddress);
-    }
-    if (device_sn > 0) {
-        BleProto::appendTlvU64(deviceInfoFrame.data, BleProto::TLV_DEVICE_SN, device_sn);//添加设备SN到TLV数据中
-    }
-    
-    // 编码为二进制并设置特征值
-    std::vector<uint8_t> deviceInfoBinary = BleProto::encodeFrame(deviceInfoFrame);
-    deviceInfoCharacteristic->setValue(deviceInfoBinary.data(), deviceInfoBinary.size());
-    
-    Serial.printf("📋 [BLE] 设备信息特征已初始化为TLV格式, 长度=%u字节\n", 
-                  static_cast<unsigned>(deviceInfoBinary.size()));
+    deviceInfoCharacteristic->addDescriptor(new BLE2902());//添加通知描述符，用于客户端订阅设备信息更新
     
     // 启动服务（必须在广播前调用）
     radarDataService->start();
@@ -605,9 +587,9 @@ void bleConfigTask(void *parameter) {
     while(1) {
         processBLEConfig();//处理BLE配置命令
 
-        // 定期更新雷达状态特征
+        // 定期更新雷达状态特征（受 continuousSendEnabled 控制）
         unsigned long currentTime = millis();
-        if (deviceConnected && (currentTime - lastRadarStatusUpdate >= RADAR_STATUS_UPDATE_INTERVAL)) {
+        if (deviceConnected && continuousSendEnabled && (currentTime - lastRadarStatusUpdate >= RADAR_STATUS_UPDATE_INTERVAL)) {
             updateRadarStatus();
             lastRadarStatusUpdate = currentTime;
         }
@@ -619,8 +601,7 @@ void bleConfigTask(void *parameter) {
             oldDeviceConnected = deviceConnected;
         }
         if (deviceConnected && !oldDeviceConnected) {//如果设备连接且之前未连接过
-            // 连接后立即更新一次雷达状态
-            updateRadarStatus();
+            // 连接后不自动推送，等待客户端发送 CMD_START_CONTINUOUS 命令
             oldDeviceConnected = deviceConnected;
         }
 
@@ -639,7 +620,7 @@ void radarCmdTask(void *parameter) {
 
     static const uint8_t radar_cmds[][3] = {
         {0x84, 0x81, 0x0F},  // 0x81: 查询心率/呼吸率
-        {0x84, 0x8D, 0x0F},  // 0x8D: 查询睡眠状态
+        {0x84, 0x8D, 0x0F},  // 0x8D: 查询睡眠状态（受 radarSleepQueryEnabled 控制）
         {0x84, 0x8F, 0x0F},  // 0x8F: 查询体动数据
         {0x84, 0x8E, 0x0F},  // 0x8E: 查询人员存在
         {0x84, 0x91, 0x0F},  // 0x91: 查询呼吸波形
@@ -648,8 +629,11 @@ void radarCmdTask(void *parameter) {
         {0x84, 0x84, 0x0F},  // 0x84: 查询心跳波形(备用)
         {0x84, 0x85, 0x0F},  // 0x85: 查询心跳波形(扩展)
         {0x84, 0x86, 0x0F},  // 0x86: 查询心跳波形(扩展)
-        {0x84, 0x90, 0x0F}   // 0x90: 查询综合状态
+        {0x84, 0x90, 0x0F}   // 0x90: 查询综合状态（受 radarSleepQueryEnabled 控制）
     };
+    // 受控命令索引：0x8D(索引1) 和 0x90(索引10)
+    static const size_t SLEEP_CMD_INDICES[] = {1, 10};
+    static const size_t SLEEP_CMD_COUNT = sizeof(SLEEP_CMD_INDICES) / sizeof(SLEEP_CMD_INDICES[0]);
 
     static size_t cmdIndex = 0;//当前命令索引
     static unsigned long lastCmdMillis = 0;//上次发送命令的时间戳
@@ -659,6 +643,23 @@ void radarCmdTask(void *parameter) {
         unsigned long now = millis();//获取当前时间戳
 
         if (now - lastCmdMillis >= CMD_INTERVAL) {
+            // 检查当前命令是否为受控命令（0x8D/0x90），且开关未开启
+            bool isSleepCmd = false;
+            for (size_t i = 0; i < SLEEP_CMD_COUNT; i++) {
+                if (cmdIndex == SLEEP_CMD_INDICES[i]) {
+                    isSleepCmd = true;
+                    break;
+                }
+            }
+            if (isSleepCmd && !radarSleepQueryEnabled) {
+                // 跳过受控命令，不发送
+                cmdIndex++;
+                if (cmdIndex >= sizeof(radar_cmds) / sizeof(radar_cmds[0])) {
+                    cmdIndex = 0;
+                }
+                continue;
+            }
+
             sendRadarCommand(
                 radar_cmds[cmdIndex][0],
                 radar_cmds[cmdIndex][1],
