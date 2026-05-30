@@ -33,7 +33,6 @@
 
 extern Preferences preferences;
 extern WiFiManager wifiManager;
-extern uint16_t currentDeviceId;
 extern uint64_t device_sn;
 extern bool deviceConnected;
 extern bool oldDeviceConnected;
@@ -52,7 +51,7 @@ extern void sendSleepDataToInfluxDB();
 extern void setNetworkStatus(NetworkStatus status);
 extern void clearStoredConfig();
 extern void loadDeviceSN();
-extern void saveDeviceId();
+extern void saveDeviceSn();
 extern std::string buildBLEManufacturerData();
 extern void refreshBLEAdvertisingData();
 extern String getDeviceMacAddress();

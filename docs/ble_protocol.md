@@ -1,15 +1,24 @@
-# BLE TLV Protocol
+# BLE TLV 协议说明
 
-本文档描述固件与小程序之间的 BLE GATT 通信协议。协议目标是避免 BLE 长包兼容问题，统一使用 `Notify + TLV 帧 + 20 字节分包重组`，并明确请求响应与主动推送的边界。
+本文档描述固件与蓝牙小程序之间的 BLE GATT 通信协议。当前协议目标是保持通信层简单稳定：所有业务数据统一封装为 TLV 帧，通过 Notify 分包发送；命令响应只用 `TLV_RESULT_CODE` 表达结果，具体文案由小程序根据错误码或状态码映射。
 
 ## 1. 设计原则
 
-1. 客户端必须先按特征 UUID 分流，再按 `cmd` 解析。
-2. `b1/b2` 是请求响应通道，所有命令响应和错误响应都走 `b2`。
-3. `a1/a2/b3` 是主动推送通道，客户端不能把这些帧当成命令响应。
-4. 所有 Notify 数据都可能超过 20 字节，客户端必须按特征分别维护重组缓冲区。
-5. 同一个 TLV 类型在所有通道中的数据类型必须保持一致。
-6. `READ` 不作为主协议能力使用，客户端不要调用 `readBLECharacteristicValue` 读取业务数据。
+1. 客户端必须先按 GATT 特征 UUID 分流，再按 `cmd` 解析。
+
+2. `b1/b2` 是命令请求/响应通道：客户端写 `b1`，设备通过 `b2` notify 响应。
+
+3. `a1/a2/b3` 是主动推送通道，不参与请求响应匹配。
+
+4. Notify 数据可能超过单包大小，客户端必须按特征分别维护重组 buffer。
+
+5. 命令响应只以 `TLV_RESULT_CODE` 作为结果事实来源。
+
+6. 状态变化通过 `b3` 推送，和命令结果解耦。
+
+7. 协议层不再使用 `flags`、`ACK`、`TLV_STATE`、`TLV_STEP`、`TLV_MESSAGE`、`TLV_ERROR_MESSAGE`；这些字段当前不再定义为有效业务字段。
+
+8. `READ` 不作为主协议能力使用，客户端不要依赖 `readBLECharacteristicValue` 获取业务数据。
 
 ## 2. GATT 服务与特征
 
@@ -27,57 +36,15 @@
 | --- | --- | --- | --- | --- |
 | `DEVICE_CONFIG_SERVICE_UUID` | `a8c1e5c0-3d5d-4a9d-8d5e-7c8b6a4e2f1b` | Service | - | 设备配置服务 |
 | `DEVICE_COMMAND_CHAR_UUID` (`b1`) | `beb5483e-36e1-4688-b7f5-ea07361b26b1` | `WRITE` | 客户端 -> 设备 | 命令写入 |
-| `DEVICE_RESULT_CHAR_UUID` (`b2`) | `beb5483e-36e1-4688-b7f5-ea07361b26b2` | `NOTIFY` | 设备 -> 客户端 | 命令响应与错误响应 |
-| `DEVICE_INFO_CHAR_UUID` (`b3`) | `beb5483e-36e1-4688-b7f5-ea07361b26b3` | `NOTIFY` | 设备 -> 客户端 | 设备信息低频推送 |
+| `DEVICE_RESULT_CHAR_UUID` (`b2`) | `beb5483e-36e1-4688-b7f5-ea07361b26b2` | `NOTIFY` | 设备 -> 客户端 | 命令响应 |
+| `DEVICE_INFO_CHAR_UUID` (`b3`) | `beb5483e-36e1-4688-b7f5-ea07361b26b3` | `NOTIFY` | 设备 -> 客户端 | 设备信息与状态主动推送 |
 
-## 3. 通信模型
-
-### 3.1 请求响应模型
-
-客户端写 `b1`，设备从 `b2` 返回响应。
-
-适用场景：
-
-- 查询设备概览。
-- 查询雷达快照。
-- 启动或停止连续推送。
-- 设置设备 ID。
-- WiFi 扫描、配置、查询。
-- 错误返回。
-
-请求响应规则：
-
-- 请求帧由客户端生成 `seq`。
-- 响应帧必须原样带回请求 `seq`。
-- `b2` 是唯一需要按 `seq` 匹配请求的通道。
-- 失败应答分两类：
-  - 协议层失败：使用 `CMD_ERROR_RESP (0x7E)`。
-  - 业务层失败：优先使用“原命令对应的 `RESP` + `FLAG_IS_ERROR`”。
-- 无论哪种失败应答，都必须带回请求 `seq`。
-
-### 3.2 主动推送模型
-
-设备通过 `a1/a2/b3` 主动 Notify。
-
-适用场景：
-
-- `a1` 连续雷达流。
-- `a2` 雷达状态定时推送。
-- `b3` 设备信息连接后一次或信息变化时推送。
-
-主动推送规则：
-
-- 推送帧不参与请求响应匹配。
-- 推送帧可使用 `seq = 0`。
-- 客户端必须先按特征 UUID 分流。
-- 连接后首个推送可能在客户端完成订阅前丢失，关键数据必须能通过 `b1/b2` 重新查询。
-
-## 4. 二进制帧格式
+## 3. 二进制帧格式
 
 所有业务数据统一封装为 TLV 帧：
 
 ```text
-SOF1 SOF2 VERSION CMD FLAGS SEQ LEN_H LEN_L PAYLOAD CRC_H CRC_L
+SOF1 SOF2 VERSION CMD SEQ LEN_H LEN_L PAYLOAD CRC_H CRC_L
 ```
 
 | 字段 | 长度 | 说明 |
@@ -86,76 +53,23 @@ SOF1 SOF2 VERSION CMD FLAGS SEQ LEN_H LEN_L PAYLOAD CRC_H CRC_L
 | `SOF2` | 1 | 固定 `0x55` |
 | `VERSION` | 1 | 当前 `0x01` |
 | `CMD` | 1 | 命令码 |
-| `FLAGS` | 1 | 标志位 |
-| `SEQ` | 1 | 序列号 |
+| `SEQ` | 1 | 请求序列号；主动推送固定为 `0` |
 | `LEN` | 2 | `PAYLOAD` 长度，大端 |
 | `PAYLOAD` | N | TLV 数据区 |
 | `CRC` | 2 | CRC16-CCITT，大端 |
 
-CRC 校验范围：从 `VERSION` 到 `PAYLOAD` 末尾，不包含 `SOF1/SOF2`，不包含 CRC 字段本身。
+CRC 计算范围：从 `VERSION` 到 `PAYLOAD` 末尾，不包含 `SOF1/SOF2`，也不包含 `CRC` 字段本身。
 
-### 4.1 Flags
+### 3.1 Notify 分包
 
-| 标志 | 值 | 说明 |
-| --- | --- | --- |
-| `FLAG_FRAGMENT` | `0x01` | 预留分片标记。当前 Notify 分包通过连续 20 字节片段和帧长度重组，不依赖该位 |
-| `FLAG_NEED_ACK` | `0x02` | 发送方要求 ACK，预留 |
-| `FLAG_IS_ACK` | `0x04` | ACK 帧，预留 |
-| `FLAG_IS_ERROR` | `0x08` | 错误帧 |
+固件通过 `sendFrameToBLE()` 发送 Notify。客户端不能假设一次 Notify 就是一帧完整数据，必须为每个 Notify 特征分别维护重组 buffer：
 
-### 4.2 Notify 分包
+- `a1` 一个 buffer
+- `a2` 一个 buffer
+- `b2` 一个 buffer
+- `b3` 一个 buffer
 
-固件通过 `sendFrameToBLE()` 发送 Notify 帧，当前固定按 20 字节分包。
-
-客户端不应假设一次 Notify 就是一帧完整数据。客户端必须对每个 Notify 特征分别维护接收缓冲区：
-
-- `a1` 一个 buffer。
-- `a2` 一个 buffer。
-- `b2` 一个 buffer。
-- `b3` 一个 buffer。
-
-## 5. 命令码
-
-### 5.1 系统命令
-
-| 命令 | 值 | 通道 | 说明 |
-| --- | --- | --- | --- |
-| `CMD_PING` | `0x01` | `b1/b2` | Ping 请求/响应（一问一答共用命令码） |
-
-### 5.2 雷达与状态命令
-
-| 命令 | 值 | 通道 | 说明 |
-| --- | --- | --- | --- |
-| `CMD_QUERY_STATUS` | `0x10` | `b1/b2` | 查询设备概览 请求/响应（一问一答共用命令码） |
-| `CMD_QUERY_RADAR` | `0x12` | `b1/b2` | 查询雷达快照 请求/响应（一问一答共用命令码） |
-| `CMD_START_CONTINUOUS` | `0x14` | `b1/b2` | 启动连续推送 请求/响应（一问一答共用命令码） |
-| `CMD_STOP_CONTINUOUS` | `0x16` | `b1/b2` | 停止连续推送 请求/响应（一问一答共用命令码） |
-| `CMD_CONTINUOUS_PUSH` | `0x18` | `a1` | 连续雷达数据推送（主动推送） |
-| `CMD_DEVICE_INFO_PUSH` | `0x19` | `b3` | 设备信息主动推送（主动推送） |
-| `CMD_RADAR_STATUS_PUSH` | `0x1A` | `a2` | 雷达状态主动推送（主动推送） |
-
-### 5.3 WiFi 命令
-
-| 命令 | 值 | 通道 | 说明 |
-| --- | --- | --- | --- |
-| `CMD_WIFI_SCAN` | `0x20` | `b1/b2` | WiFi 扫描 请求/响应（一问一答共用命令码） |
-| `CMD_WIFI_CONFIG` | `0x22` | `b1/b2` | WiFi 配置 请求/响应（一问一答共用命令码） |
-| `CMD_GET_SAVED_WIFI` | `0x24` | `b1/b2` | 查询已保存 WiFi 请求/响应（一问一答共用命令码） |
-
-### 5.4 设备命令
-
-| 命令 | 值 | 通道 | 说明 |
-| --- | --- | --- | --- |
-| `CMD_SET_DEVICE_ID` | `0x30` | `b1/b2` | 设置设备 ID 请求/响应（一问一答共用命令码） |
-
-### 5.5 通用命令
-
-| 命令 | 值 | 通道 | 说明 |
-| --- | --- | --- | --- |
-| `CMD_ERROR_RESP` | `0x7E` | `b2` | 错误响应 |
-| `CMD_ACK` | `0x7F` | `b2` | ACK，预留 |
-
-## 6. TLV 类型
+## 4. TLV 编码
 
 TLV 编码格式：
 
@@ -165,26 +79,62 @@ TYPE(1) LEN_H(1) LEN_L(1) VALUE(N)
 
 `LEN` 为大端。
 
+## 5. 命令码
+
+### 5.1 系统命令
+
+| 命令 | 值 | 通道 | 说明 |
+| --- | --- | --- | --- |
+| `CMD_PING` | `0x01` | `b1/b2` | Ping 请求/响应 |
+
+### 5.2 雷达与状态命令
+
+| 命令 | 值 | 通道 | 说明 |
+| --- | --- | --- | --- |
+| `CMD_QUERY_STATUS` | `0x10` | `b1/b2` | 查询设备概览 |
+| `CMD_QUERY_RADAR` | `0x12` | `b1/b2` | 查询雷达快照 |
+| `CMD_START_CONTINUOUS` | `0x14` | `b1/b2` | 启动连续数据推送 |
+| `CMD_STOP_CONTINUOUS` | `0x16` | `b1/b2` | 停止连续数据推送 |
+| `CMD_RADAR_SLEEP_QUERY` | `0x17` | `b1/b2` | 雷达睡眠/综合状态查询开关 |
+| `CMD_CONTINUOUS_PUSH` | `0x18` | `a1` | 连续雷达数据主动推送 |
+| `CMD_DEVICE_INFO_PUSH` | `0x19` | `b3` | 设备信息/状态主动推送 |
+| `CMD_RADAR_STATUS_PUSH` | `0x1A` | `a2` | 雷达状态主动推送 |
+
+### 5.3 WiFi 命令
+
+| 命令 | 值 | 通道 | 说明 |
+| --- | --- | --- | --- |
+| `CMD_WIFI_SCAN` | `0x20` | `b1/b2` | WiFi 扫描 |
+| `CMD_WIFI_CONFIG` | `0x22` | `b1/b2` | WiFi 配网 |
+| `CMD_GET_SAVED_WIFI` | `0x24` | `b1/b2` | 查询已保存 WiFi |
+| `CMD_DELETE_SAVED_WIFI` | `0x26` | `b1/b2` | 删除已保存 WiFi |
+
+### 5.4 通用命令
+
+| 命令 | 值 | 通道 | 说明 |
+| --- | --- | --- | --- |
+| `CMD_ERROR_RESP` | `0x7E` | `b2` | 协议层错误响应 |
+
+## 6. TLV 类型
+
 ### 6.1 设备信息 TLV
 
 | TLV | 值 | 类型 | 说明 |
 | --- | --- | --- | --- |
-| `TLV_DEVICE_ID` | `0x01` | `uint16` | 设备 ID |
 | `TLV_RESULT_CODE` | `0x02` | `uint8` | 结果码 |
-| `TLV_ERROR_MESSAGE` | `0x03` | `string` | 错误信息 |
 | `TLV_TIMESTAMP` | `0x04` | `uint32` | 时间戳，通常为 `millis()` |
 | `TLV_PROTOCOL_VERSION` | `0x05` | `string` | 协议版本 |
-| `TLV_DEVICE_SN` | `0x06` | `uint64` | 设备序列号 |
+| `TLV_DEVICE_SN` | `0x06` | `uint64` | 设备序列号，仅存在时发送 |
 | `TLV_FIRMWARE_VERSION` | `0x07` | `string` | 固件版本 |
 | `TLV_DEVICE_TYPE` | `0x08` | `string` | 设备类型 |
 | `TLV_MAC_ADDRESS` | `0x09` | `string` | MAC 地址 |
 
 约束：
 
-- `TLV_DEVICE_SN` 必须始终是 `uint64`。
-- 没有设备 SN 时，不发送 `TLV_DEVICE_SN`。
-- 不要把 MAC 字符串写入 `TLV_DEVICE_SN`。
-- 如需统一字符串身份标识，应新增独立 TLV，例如 `TLV_DEVICE_UID`。
+- `TLV_DEVICE_SN` 固定为 `uint64`。
+- 没有设备 SN 时不发送 `TLV_DEVICE_SN`。
+- 不使用 MAC 字符串替代 `TLV_DEVICE_SN`。
+- 旧 `TLV_DEVICE_ID` / `CMD_SET_DEVICE_ID` 已移除；设备唯一标识优先使用 MAC，存在 SN 时可同时发送 SN。
 
 ### 6.2 雷达数据 TLV
 
@@ -209,22 +159,23 @@ TYPE(1) LEN_H(1) LEN_L(1) VALUE(N)
 | `TLV_PASSWORD` | `0x21` | `string` | WiFi 密码 |
 | `TLV_WIFI_COUNT` | `0x22` | `uint16` | WiFi 数量 |
 | `TLV_WIFI_ITEM` | `0x23` | `block` | WiFi 条目 |
-| `TLV_RSSI` | `0x24` | `int8` 或 `int16` | RSSI，建议固化为一种类型 |
-| `TLV_SECURITY` | `0x25` | `uint8` | 加密类型 |
+| `TLV_RSSI` | `0x24` | `int8` | RSSI |
+| `TLV_SECURITY` | `0x25` | `uint8` | 加密类型，见 `WifiSecurityType` |
 
-### 6.4 控制与通用 TLV
+### 6.4 控制与状态 TLV
 
 | TLV | 值 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `TLV_INTERVAL_MS` | `0x31` | `uint16` | 推送间隔，单位 ms |
-| `TLV_MESSAGE` | `0x40` | `string` | 普通消息 |
+| `TLV_RADAR_SLEEP_ENABLED` | `0x32` | `uint8` | 雷达睡眠查询开关，`0` 关闭，`1` 开启 |
+| `TLV_DEVICE_STATUS` | `0x33` | `uint8` | b3 状态推送使用 |
+| `TLV_WIFI_STATUS` | `0x34` | `uint8` | `CMD_QUERY_STATUS` 查询响应中的 WiFi 状态 |
+| `TLV_MQTT_STATUS` | `0x35` | `uint8` | `CMD_QUERY_STATUS` 查询响应中的 MQTT 状态 |
+| `TLV_RADAR_SLEEP_STATUS` | `0x36` | `uint8` | `CMD_QUERY_STATUS` 查询响应中的雷达睡眠查询状态 |
 | `TLV_IP_ADDRESS` | `0x41` | `string` | IP 地址 |
 | `TLV_WIFI_CONFIGURED` | `0x42` | `uint8` | 是否保存过 WiFi |
 | `TLV_WIFI_CONNECTED` | `0x43` | `uint8` | WiFi 是否连接 |
 | `TLV_ECHO_CONTENT` | `0x44` | `string` | Echo 内容 |
-| `TLV_STATE` | `0x45` | `uint8` | 状态 |
-| `TLV_STEP` | `0x46` | `uint8` | 流程步骤 |
-| `TLV_REASON` | `0x47` | `uint8` | 原因码 |
 
 ### 6.5 波形 TLV
 
@@ -233,30 +184,114 @@ TYPE(1) LEN_H(1) LEN_L(1) VALUE(N)
 | `TLV_HEART_WAVEFORM` | `0x60` | `uint8` | 心跳波形，原始 `int8 + 128` |
 | `TLV_BREATH_WAVEFORM` | `0x61` | `uint8` | 呼吸波形，原始 `int8 + 128` |
 
-## 7. 主要命令载荷
+## 7. 结果码
 
-### 7.1 设备概览查询
+| 结果码 | 值 | 客户端建议处理 |
+| --- | --- | --- |
+| `SUCCESS` | `0x00` | 成功 |
+| `PROCESSING` | `0x01` | 命令已接收，等待最终结果 |
+| `ERR_PROTO_CMD_UNKNOWN` | `0x13` | 未知命令 |
+| `ERR_PROTO_PARAM_MISSING` | `0x14` | 参数缺失 |
+| `ERR_PROTO_PARAM_INVALID` | `0x15` | 参数非法 |
+| `ERR_PROTO_BUSY` | `0x16` | 设备忙，稍后重试 |
+| `ERR_PROTO_FRAME_TOO_LARGE` | `0x18` | 请求帧过大 |
+| `ERR_WIFI_SCAN_TIMEOUT` | `0x20` | WiFi 扫描超时 |
+| `ERR_WIFI_SSID_NOT_FOUND` | `0x21` | 未找到 SSID |
+| `ERR_WIFI_WRONG_PASSWORD` | `0x22` | WiFi 密码错误 |
+| `ERR_WIFI_SIGNAL_WEAK` | `0x25` | WiFi 信号弱 |
+| `ERR_WIFI_BUSY` | `0x26` | WiFi 忙 |
+| `ERR_DEV_STATE_INVALID` | `0x40` | 当前设备状态不允许 |
+| `ERR_DEV_STORAGE_FAIL` | `0x41` | 存储失败 |
+| `ERR_DEV_QUEUE_FULL` | `0x42` | 队列已满 |
 
-请求：
+客户端 UI 文案应由结果码映射，不依赖固件下发字符串。
 
-| 字段 | 说明 |
-| --- | --- |
-| `cmd` | `CMD_QUERY_STATUS (0x10)` |
-| `channel` | 写入 `b1` |
-| `payload` | 可为空 |
+## 8. 设备状态码
 
-响应：
+`TLV_DEVICE_STATUS`、`TLV_WIFI_STATUS`、`TLV_MQTT_STATUS`、`TLV_RADAR_SLEEP_STATUS` 的 value 使用同一组状态码。
 
-| 字段 | 说明 |
-| --- | --- |
-| `cmd` | `CMD_QUERY_STATUS (0x10)`（与请求共用命令码） |
-| `channel` | 从 `b2` Notify |
-| `seq` | 请求 `seq` |
+### 8.1 WiFi 状态
 
-建议返回 TLV：
+| 状态 | 值 | 说明 |
+| --- | --- | --- |
+| `WIFI_DISCONNECTED` | `0x10` | WiFi 断开 |
+| `WIFI_CONNECTING` | `0x11` | WiFi 连接中 |
+| `WIFI_CONNECTED` | `0x12` | WiFi 已连接 |
+| `WIFI_FAILED` | `0x13` | WiFi 连接失败 |
+
+### 8.2 MQTT 状态
+
+| 状态 | 值 | 说明 |
+| --- | --- | --- |
+| `DEV_MQTT_DISCONNECTED` | `0x20` | MQTT 断开 |
+| `DEV_MQTT_CONNECTING` | `0x21` | MQTT 连接中 |
+| `DEV_MQTT_CONNECTED` | `0x22` | MQTT 已连接 |
+| `DEV_MQTT_FAILED` | `0x23` | MQTT 连接失败 |
+
+### 8.3 雷达睡眠查询状态
+
+| 状态 | 值 | 说明 |
+| --- | --- | --- |
+| `RADAR_SLEEP_QUERY_DISABLED` | `0x30` | 雷达睡眠/综合状态查询关闭 |
+| `RADAR_SLEEP_QUERY_ENABLED` | `0x31` | 雷达睡眠/综合状态查询开启 |
+
+## 9. 命令响应模型
+
+### 9.1 普通命令
+
+客户端写 `b1`，设备从 `b2` 返回响应：
+
+```text
+cmd = 原命令码
+seq = 请求 seq
+payload = TLV_RESULT_CODE + 业务数据 TLV
+```
+
+失败时也使用原命令码响应，`TLV_RESULT_CODE` 为对应错误码。协议层无法归属到具体业务命令的入口级错误，使用 `CMD_ERROR_RESP (0x7E)`。
+
+响应不发送：
+
+- `flags`
+- `TLV_MESSAGE`
+- `TLV_ERROR_MESSAGE`
+- `TLV_STATE`
+- `TLV_STEP`
+
+### 9.2 异步长命令
+
+适用命令：
+
+- `CMD_WIFI_SCAN`
+- `CMD_WIFI_CONFIG`
+
+收到命令后立即返回处理中：
+
+```text
+cmd = 原命令码
+seq = 请求 seq
+TLV_RESULT_CODE = PROCESSING
+```
+
+最终完成后再次返回：
+
+```text
+cmd = 原命令码
+seq = 请求 seq
+TLV_RESULT_CODE = SUCCESS 或 ERR_XXX
+业务数据 TLV（如 SSID、IP、WiFi 列表）
+```
+
+流程进度不再通过 `TLV_STATE/TLV_STEP` 表达。WiFi、MQTT、雷达睡眠查询等运行状态通过 b3 状态推送表达。
+
+## 10. 主要命令载荷
+
+### 10.1 `CMD_QUERY_STATUS`
+
+请求 payload 可为空。
+
+响应 TLV：
 
 - `TLV_RESULT_CODE`
-- `TLV_DEVICE_ID`
 - `TLV_PROTOCOL_VERSION`
 - `TLV_FIRMWARE_VERSION`
 - `TLV_DEVICE_TYPE`
@@ -265,72 +300,149 @@ TYPE(1) LEN_H(1) LEN_L(1) VALUE(N)
 - `TLV_WIFI_CONFIGURED`
 - `TLV_WIFI_CONNECTED`
 - `TLV_IP_ADDRESS`，仅 WiFi 已连接时发送
+- `TLV_WIFI_STATUS`，当前 WiFi 状态存在时发送
+- `TLV_MQTT_STATUS`，当前 MQTT 状态存在时发送
+- `TLV_RADAR_SLEEP_STATUS`，当前雷达睡眠查询状态存在时发送
 
-### 7.2 雷达快照查询
+### 10.2 `CMD_QUERY_RADAR`
 
-请求：
+请求 payload 可为空。
 
-| 字段 | 说明 |
-| --- | --- |
-| `cmd` | `CMD_QUERY_RADAR (0x12)` |
-| `channel` | 写入 `b1` |
-| `payload` | 可为空 |
-
-响应：
-
-| 字段 | 说明 |
-| --- | --- |
-| `cmd` | `CMD_QUERY_RADAR (0x12)`（与请求共用命令码） |
-| `channel` | 从 `b2` Notify |
-| `seq` | 请求 `seq` |
-
-建议返回 TLV：
+响应 TLV：
 
 - `TLV_RESULT_CODE`
-- `TLV_DEVICE_ID`
 - `TLV_TIMESTAMP`
 - `TLV_PRESENCE`
 - `TLV_HEART_RATE_X10`
 - `TLV_BREATH_RATE_X10`
 - `TLV_MOTION`
 - `TLV_DISTANCE_CM`
-- `TLV_SLEEP_STATE`
 - `TLV_POS_X_MM`
 - `TLV_POS_Y_MM`
 - `TLV_POS_Z_MM`
 - `TLV_BODY_MOVEMENT`
 
-### 7.3 设备信息主动推送
+当前固件未在 `CMD_QUERY_RADAR` 响应中发送 `TLV_SLEEP_STATE`。该 TLV 类型保留在协议定义中，但客户端不应依赖此命令返回睡眠状态。
 
-| 字段 | 说明 |
-| --- | --- |
-| `cmd` | `CMD_DEVICE_INFO_PUSH (0x19)` |
-| `channel` | `b3` |
-| `seq` | `0` |
-| `trigger` | 连接后一次，或设备信息变化时 |
+### 10.3 `CMD_WIFI_SCAN`
 
-建议返回 TLV：
+收到请求后先返回：
+
+- `TLV_RESULT_CODE = PROCESSING`
+
+最终响应：
 
 - `TLV_RESULT_CODE`
-- `TLV_DEVICE_ID`
+- `TLV_WIFI_COUNT`，成功且存在扫描结果时发送
+- 多个 `TLV_WIFI_ITEM`
+
+每个 `TLV_WIFI_ITEM` 内部包含：
+
+- `TLV_SSID`
+- `TLV_RSSI`
+- `TLV_SECURITY`
+
+### 10.4 `CMD_WIFI_CONFIG`
+
+请求 TLV：
+
+- `TLV_SSID`
+- `TLV_PASSWORD`
+
+收到请求后先返回：
+
+- `TLV_RESULT_CODE = PROCESSING`
+- `TLV_SSID`
+
+最终响应：
+
+- `TLV_RESULT_CODE`
+- `TLV_SSID`，成功时发送
+- `TLV_IP_ADDRESS`，成功时发送
+
+### 10.5 `CMD_GET_SAVED_WIFI`
+
+响应 TLV：
+
+- `TLV_RESULT_CODE`
+- `TLV_WIFI_COUNT`
+- 多个 `TLV_WIFI_ITEM`，每个条目至少包含 `TLV_SSID`
+
+### 10.6 `CMD_DELETE_SAVED_WIFI`
+
+请求 TLV：
+
+- `TLV_SSID`
+
+响应 TLV：
+
+- `TLV_RESULT_CODE`
+
+### 10.7 `CMD_RADAR_SLEEP_QUERY`
+
+请求 TLV：
+
+- `TLV_RADAR_SLEEP_ENABLED`，`0` 关闭，`1` 开启
+
+响应 TLV：
+
+- `TLV_RESULT_CODE`
+- `TLV_RADAR_SLEEP_ENABLED`
+
+如果开关状态发生变化，设备另外通过 b3 推送：
+
+- `TLV_DEVICE_STATUS = RADAR_SLEEP_QUERY_DISABLED` 或 `RADAR_SLEEP_QUERY_ENABLED`
+
+## 11. 主动推送
+
+### 11.1 b3 设备状态推送
+
+通道：`b3`
+
+帧：
+
+```text
+cmd = CMD_DEVICE_INFO_PUSH (0x19)
+seq = 0
+payload = TLV_DEVICE_STATUS
+```
+
+b3 状态推送与命令完全解耦。设备只在状态变化时推送；BLE 连接建立后可同步当前已知状态。
+
+状态推送统一只发送状态码，不发送 `TLV_MESSAGE`。
+
+### 11.2 b3 设备信息推送
+
+通道：`b3`
+
+帧：
+
+```text
+cmd = CMD_DEVICE_INFO_PUSH (0x19)
+seq = 0
+```
+
+常见 TLV：
+
+- `TLV_RESULT_CODE`
 - `TLV_PROTOCOL_VERSION`
 - `TLV_FIRMWARE_VERSION`
 - `TLV_DEVICE_TYPE`
 - `TLV_MAC_ADDRESS`
 - `TLV_DEVICE_SN`，仅设备 SN 存在时发送
 
-说明：`b3` 不应周期推送。客户端若未收到 `b3`，应通过 `CMD_QUERY_STATUS (0x10)` 查询。
+### 11.3 a2 雷达状态推送
 
-### 7.4 雷达状态主动推送
+通道：`a2`
 
-| 字段 | 说明 |
-| --- | --- |
-| `cmd` | `CMD_RADAR_STATUS_PUSH (0x1A)` |
-| `channel` | `a2` |
-| `seq` | `0` |
-| `trigger` | 当前固件每 1 秒推送一次 |
+帧：
 
-建议返回 TLV：
+```text
+cmd = CMD_RADAR_STATUS_PUSH (0x1A)
+seq = 0
+```
+
+常见 TLV：
 
 - `TLV_DISTANCE_CM`
 - `TLV_POS_X_MM`
@@ -338,270 +450,51 @@ TYPE(1) LEN_H(1) LEN_L(1) VALUE(N)
 - `TLV_POS_Z_MM`
 - `TLV_BODY_MOVEMENT`
 
-客户端如需完整雷达快照，应通过 `0x12 -> 0x13` 查询。
+### 11.4 a1 连续雷达数据推送
 
-## 8. 错误码
+通道：`a1`
 
-失败应答规范：
-
-### 8.1 即时命令失败
-
-适用命令：
-
-- `CMD_QUERY_STATUS`
-- `CMD_QUERY_RADAR`
-- `CMD_START_CONTINUOUS`
-- `CMD_STOP_CONTINUOUS`
-- `CMD_SET_DEVICE_ID`
-- `CMD_PING`
-
-规则：
-
-- 使用该命令自己的命令码（一问一答共用），不使用 `CMD_ERROR_RESP`。
-- `flags` 必须包含 `FLAG_IS_ERROR`。
-- 必须包含 `TLV_RESULT_CODE`。
-- 可选包含 `TLV_ERROR_MESSAGE`。
-- 不强制包含 `TLV_STATE/TLV_STEP/TLV_REASON`。
-
-推荐格式：
-
-| 字段 | 值 |
-| --- | --- |
-| `cmd` | 原命令码，例如 `CMD_QUERY_STATUS (0x10)`、`CMD_QUERY_RADAR (0x12)` |
-| `flags` | 包含 `FLAG_IS_ERROR (0x08)` |
-| `channel` | `b2` |
-| `seq` | 对应请求 `seq` |
-
-推荐 TLV：
-
-- `TLV_RESULT_CODE`
-- `TLV_ERROR_MESSAGE`
-
-说明：
-
-- 对“一问一答”的即时响应，`TLV_RESULT_CODE` 是唯一事实来源。
-- `FLAG_IS_ERROR` 负责告诉客户端“这是失败帧”。
-- `TLV_STATE = FAILED` 在即时命令里通常没有信息增量，不建议强制保留。
-
-### 8.2 异步多阶段流程失败
-
-适用命令：
-
-- `CMD_WIFI_CONFIG`
-- `CMD_WIFI_SCAN`
-- 未来其他需要 `PROCESSING -> SUCCESS/FAILED` 的命令
-
-规则：
-
-- 仍使用该命令自己的命令码，例如 `CMD_WIFI_CONFIG (0x22)`、`CMD_WIFI_SCAN (0x20)`。
-- 处理中 ACK 不带 `FLAG_IS_ERROR`，但应返回 `TLV_RESULT_CODE = PROCESSING`。
-- 失败完成态带 `FLAG_IS_ERROR`。
-- 必须包含 `TLV_RESULT_CODE`。
-- 推荐包含 `TLV_STATE/TLV_STEP`。
-- 需要诊断信息时可加 `TLV_REASON`、`TLV_ERROR_MESSAGE`。
-
-处理中 ACK 推荐格式：
-
-| 字段 | 值 |
-| --- | --- |
-| `cmd` | 原命令码 |
-| `flags` | `0` |
-| `channel` | `b2` |
-| `seq` | 对应请求 `seq` |
-
-推荐 TLV：
-
-- `TLV_RESULT_CODE = PROCESSING`
-- `TLV_STATE = PROCESSING`
-- `TLV_STEP = 当前步骤`
-
-失败完成态推荐格式：
-
-| 字段 | 值 |
-| --- | --- |
-| `cmd` | 原命令对应的 `RESP` |
-| `flags` | 包含 `FLAG_IS_ERROR (0x08)` |
-| `channel` | `b2` |
-| `seq` | 对应请求 `seq` |
-
-推荐 TLV：
-
-- `TLV_RESULT_CODE`
-- `TLV_STATE = FAILED`
-- `TLV_STEP`
-- `TLV_REASON`
-- `TLV_ERROR_MESSAGE`
-
-### 8.3 协议层失败
-
-适用场景：
-
-- 未知命令
-- 帧格式错误
-- 长度非法
-- CRC 错误
-- 命令帧超过接收缓冲区上限
-- 无法归属到某个具体业务响应命令的入口级失败
-
-协议层失败使用：
-
-| 字段 | 值 |
-| --- | --- |
-| `cmd` | `CMD_ERROR_RESP (0x7E)` |
-| `flags` | 包含 `FLAG_IS_ERROR (0x08)` |
-| `channel` | `b2` |
-| `seq` | 对应请求 `seq` |
-
-协议层失败推荐 TLV：
-
-- `TLV_RESULT_CODE`
-- `TLV_ERROR_MESSAGE`
-
-说明：
-
-- 协议层失败的重点是告诉客户端“这条请求压根没被正常受理”。
-- 这类错误通常不需要 `TLV_STATE/TLV_STEP`。
-- `CMD_ERROR_RESP` 不应用来承载正常业务命令的失败结果，否则客户端很难按命令分类处理。
-
-### 8.4 协议错误
-
-| 错误码 | 值 | 建议客户端处理 |
-| --- | --- | --- |
-| `SUCCESS` | `0x00` | 成功 |
-| `PROCESSING` | `0x01` | 等待后续状态 |
-| `PARTIAL_SUCCESS` | `0x02` | 展示部分成功原因 |
-| `UNKNOWN` | `0x0F` | 记录日志 |
-| `ERR_PROTO_CRC_FAIL` | `0x10` | 丢弃，必要时重发 |
-| `ERR_PROTO_FRAME_INVALID` | `0x11` | 检查帧格式 |
-| `ERR_PROTO_LEN_INVALID` | `0x12` | 检查长度字段 |
-| `ERR_PROTO_CMD_UNKNOWN` | `0x13` | 检查协议版本和命令码 |
-| `ERR_PROTO_PARAM_MISSING` | `0x14` | 补齐参数 |
-| `ERR_PROTO_PARAM_INVALID` | `0x15` | 修正参数 |
-| `ERR_PROTO_BUSY` | `0x16` | 延迟重试 |
-| `ERR_PROTO_TIMEOUT` | `0x17` | 可重试 |
-| `ERR_PROTO_FRAME_TOO_LARGE` | `0x18` | 缩小请求帧，不要原样重试 |
-
-### 8.5 WiFi 错误
-
-| 错误码 | 值 | 建议客户端处理 |
-| --- | --- | --- |
-| `ERR_WIFI_SCAN_TIMEOUT` | `0x20` | 提示扫描超时，可重试 |
-| `ERR_WIFI_SSID_NOT_FOUND` | `0x21` | 提示未找到网络 |
-| `ERR_WIFI_WRONG_PASSWORD` | `0x22` | 提示密码错误 |
-| `ERR_WIFI_CONNECT_TIMEOUT` | `0x23` | 提示连接超时 |
-| `ERR_WIFI_IP_TIMEOUT` | `0x24` | 提示获取 IP 超时 |
-| `ERR_WIFI_SIGNAL_WEAK` | `0x25` | 提示信号弱 |
-| `ERR_WIFI_BUSY` | `0x26` | 稍后重试 |
-| `ERR_WIFI_DISCONNECTED` | `0x27` | 提示连接中断 |
-
-### 8.6 雷达错误
-
-| 错误码 | 值 | 建议客户端处理 |
-| --- | --- | --- |
-| `ERR_RADAR_NO_DATA` | `0x30` | 展示无数据 |
-| `ERR_RADAR_UART_TIMEOUT` | `0x31` | 设备通信异常 |
-| `ERR_RADAR_FRAME_INVALID` | `0x32` | 雷达帧异常 |
-| `ERR_RADAR_HW_FAULT` | `0x33` | 硬件故障 |
-| `ERR_RADAR_NOT_READY` | `0x34` | 稍后重试 |
-
-### 8.7 设备错误
-
-| 错误码 | 值 | 建议客户端处理 |
-| --- | --- | --- |
-| `ERR_DEV_STATE_INVALID` | `0x40` | 当前状态不允许 |
-| `ERR_DEV_STORAGE_FAIL` | `0x41` | 存储失败 |
-| `ERR_DEV_QUEUE_FULL` | `0x42` | 延迟重试 |
-| `ERR_DEV_NO_MEMORY` | `0x43` | 设备资源不足 |
-| `ERR_DEV_NOT_CONNECTED` | `0x44` | 检查连接状态 |
-
-### 8.8 云端错误
-
-| 错误码 | 值 | 建议客户端处理 |
-| --- | --- | --- |
-| `ERR_CLOUD_MQTT_FAIL` | `0x50` | 展示云端通信异常 |
-| `ERR_CLOUD_HTTP_FAIL` | `0x51` | 展示 HTTP 异常 |
-| `ERR_CLOUD_UPLOAD_TIMEOUT` | `0x52` | 展示上传超时 |
-
-### 8.9 客户端判定顺序
-
-客户端收到 `b2` 响应后，建议按下面顺序处理：
-
-1. 先看 `cmd`，确定这是哪类响应：
-   - 原命令对应的 `RESP`
-   - `CMD_ERROR_RESP`
-2. 再看 `flags` 是否包含 `FLAG_IS_ERROR`。
-3. 必读 `TLV_RESULT_CODE`，这是唯一结果事实来源。
-4. 只有异步多阶段流程才进一步解析 `TLV_STATE/TLV_STEP/TLV_REASON`。
-5. 若存在 `TLV_ERROR_MESSAGE`，仅用于展示和诊断，不作为逻辑分支依据。
-
-## 9. 客户端接入流程
-
-### 9.1 连接流程
+帧：
 
 ```text
-客户端扫描设备
-客户端连接设备
-客户端发现服务和特征
-客户端订阅 a1/a2/b2/b3
-客户端初始化每个 Notify 特征的独立重组缓冲区
-客户端发送 0x10 查询设备概览
-客户端按需发送 0x12 查询雷达快照
+cmd = CMD_CONTINUOUS_PUSH (0x18)
+seq = 设备侧自增或固定策略
 ```
 
-说明：即使设备连接后会主动推送 `b3/a2`，客户端也不应依赖首包必达。
+当前固件实际发送 TLV：
 
-### 9.2 请求响应时序
+- `TLV_PRESENCE`
+- `TLV_HEART_RATE_X10`
+- `TLV_BREATH_RATE_X10`
+- `TLV_MOTION`
 
-```text
-Client                     Device
-  |                          |
-  | write b1: CMD_REQ(seq=N) |
-  |------------------------->|
-  |                          |
-  | notify b2: CMD_RESP(seq=N), chunk 1
-  |<-------------------------|
-  | notify b2: CMD_RESP(seq=N), chunk 2
-  |<-------------------------|
-  |                          |
-  | reassemble + CRC check   |
-  | match by cmd + seq       |
-```
+以下 TLV 类型保留在协议定义中，但当前固件的 `a1` 连续推送未发送：
 
-### 9.3 主动推送时序
+- `TLV_TIMESTAMP`
+- `TLV_DISTANCE_CM`
+- `TLV_SLEEP_STATE`
+- `TLV_HEART_WAVEFORM`
+- `TLV_BREATH_WAVEFORM`
 
-```text
-Client                     Device
-  |                          |
-  | subscribe a2             |
-  |------------------------->|
-  |                          |
-  | notify a2: CMD_RADAR_STATUS_PUSH
-  |<-------------------------|
-  | notify a2: CMD_RADAR_STATUS_PUSH
-  |<-------------------------|
-```
+## 12. 客户端接入要求
 
-### 9.4 设备信息兜底时序
+1. 先按特征 UUID 分流。
 
-```text
-Client                     Device
-  |                          |
-  | subscribe b3             |
-  |------------------------->|
-  |                          |
-  | maybe notify b3: CMD_DEVICE_INFO_PUSH
-  |<-------------------------|
-  |                          |
-  | if b3 missing or invalid |
-  | write b1: CMD_QUERY_STATUS(seq=N)
-  |------------------------->|
-  | notify b2: CMD_QUERY_STATUS(seq=N)
-  |<-------------------------|
-```
+2. 每个 Notify 特征维护独立重组 buffer。
 
-## 10. 客户端伪代码
+3. 只在 `b2` 上按 `seq` 匹配请求响应。
 
-### 10.1 Notify 重组器
+4. `a1/a2/b3` 不做请求响应匹配。
+
+5. 所有响应以 `TLV_RESULT_CODE` 为唯一结果判断来源。
+
+6. 错误文案、状态文案由小程序根据错误码/状态码本地映射。
+
+7. 不依赖 `TLV_MESSAGE`、`TLV_ERROR_MESSAGE`、`flags`、`ACK`、`TLV_STATE`、`TLV_STEP`。
+
+## 13. 客户端伪代码
+
+### 13.1 Notify 重组
 
 ```javascript
 const buffers = {
@@ -630,7 +523,7 @@ function onNotify(characteristicId, chunk) {
 }
 ```
 
-### 10.2 按通道分发
+### 13.2 通道分发
 
 ```javascript
 function dispatchByChannel(channel, frame) {
@@ -642,7 +535,7 @@ function dispatchByChannel(channel, frame) {
       handleRadarStatusPush(frame)
       break
     case 'b3':
-      handleDeviceInfoPush(frame)
+      handleDeviceInfoOrStatusPush(frame)
       break
     case 'b2':
       handleCommandResponse(frame)
@@ -651,7 +544,7 @@ function dispatchByChannel(channel, frame) {
 }
 ```
 
-### 10.3 请求响应匹配
+### 13.3 请求响应匹配
 
 ```javascript
 const pending = new Map()
@@ -670,58 +563,33 @@ function handleCommandResponse(frame) {
     return
   }
 
-  pending.delete(frame.seq)
-
-  if (frame.flags & FLAG_IS_ERROR || frame.cmd === CMD_ERROR_RESP) {
-    handleError(frame)
-    return
+  const resultCode = getTlvU8(frame.payload, TLV_RESULT_CODE)
+  if (resultCode !== PROCESSING) {
+    pending.delete(frame.seq)
   }
 
-  handleSuccess(req.cmd, frame)
+  routeCommandResult(req.cmd, resultCode, frame.payload)
 }
 ```
 
-## 11. 固件实现约束
+## 14. 固件实现约束
 
-1. 所有业务 Notify 必须调用 `sendFrameToBLE()`。
+1. 所有业务 Notify 必须通过 `sendFrameToBLE()` 发送。
+
 2. 不允许直接 `setValue(fullFrame); notify();` 发送完整业务帧。
-3. `DEVICE_INFO_CHAR_UUID (b3)` 不支持 `READ`，只支持 `NOTIFY`。
-4. `RADAR_STATUS_CHAR_UUID (a2)` 不支持 `READ`，只支持 `NOTIFY`。
-5. `CMD_QUERY_STATUS (0x10)` 用于 b1 请求和 b2 响应（一问一答共用命令码）。
-6. `CMD_QUERY_RADAR (0x12)` 用于 b1 请求和 b2 响应（一问一答共用命令码）。
+
+3. `DEVICE_INFO_CHAR_UUID (b3)` 只作为 notify 通道使用。
+
+4. `RADAR_STATUS_CHAR_UUID (a2)` 只作为 notify 通道使用。
+
+5. `CMD_QUERY_STATUS (0x10)` 用于 `b1` 请求和 `b2` 响应。
+
+6. `CMD_QUERY_RADAR (0x12)` 用于 `b1` 请求和 `b2` 响应。
+
 7. `CMD_DEVICE_INFO_PUSH (0x19)` 只用于 `b3`。
+
 8. `CMD_RADAR_STATUS_PUSH (0x1A)` 只用于 `a2`。
-9. `TLV_DEVICE_SN` 必须固定为 `uint64`。
-10. `b1` 写入超过固件缓冲区上限时，必须返回 `ERR_PROTO_FRAME_TOO_LARGE`，不能静默截断。
 
-## 12. 当前建议收口项
+9. `TLV_DEVICE_SN` 固定为 `uint64`，无 SN 时不发送。
 
-### 12.1 设备 SN 语义
-
-当前协议应固定：
-
-- `TLV_DEVICE_SN`：真实设备 SN，`uint64`。
-- 无 SN 时不发送该字段。
-- 如需字符串唯一标识，新增 `TLV_DEVICE_UID`，不要复用 `TLV_DEVICE_SN`。
-
-### 12.2 设备概览命名
-
-`CMD_QUERY_STATUS (0x10)` 实际语义建议定义为"设备概览查询/响应"，一问一答共用命令码。
-
-### 12.3 b3 使用策略
-
-`b3` 不做周期推送。推荐策略：
-
-- 连接后可推一次。
-- 设备静态信息变化时推一次。
-- 客户端关键流程以 `CMD_QUERY_STATUS (0x10)` 为可靠兜底。
-
-### 12.4 客户端实现要求
-
-客户端最重要的实现点：
-
-- 先按特征 UUID 分流。
-- 每个 Notify 特征一个重组 buffer。
-- 只在 `b2` 上按 `seq` 匹配请求响应。
-- 对 `a1/a2/b3` 不做请求响应匹配。
-- 任何超过 20 字节的 Notify 都必须经过重组后再解析 TLV。
+10. `b1` 写入超过固件接收缓冲区上限时，必须返回 `ERR_PROTO_FRAME_TOO_LARGE`。

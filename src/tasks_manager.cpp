@@ -42,8 +42,8 @@ void loadDeviceSN() {
  * @brief 保存设备SN
  * 将设备SN保存到Flash中
  */
-void saveDeviceId() {
-    preferences.putULong64("deviceSn", device_sn);//将设备SN保存到Flash中
+void saveDeviceSn() {
+    preferences.putULong64("deviceSn", device_sn);
     Serial.printf("设备SN已保存到Flash: %llu\n", device_sn);
 }
 
@@ -139,13 +139,11 @@ void updateDeviceInfo() {
     BleProto::Frame infoFrame;
     infoFrame.version = BleProto::VERSION;
     infoFrame.cmd = BleProto::CMD_DEVICE_INFO_PUSH;  // 主动推送设备信息
-    infoFrame.flags = 0;
     infoFrame.seq = 0;
     infoFrame.data.clear();
     
     // 添加设备信息TLV字段
     BleProto::appendTlvU8(infoFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::SUCCESS);
-    BleProto::appendTlvU16(infoFrame.data, BleProto::TLV_DEVICE_ID, currentDeviceId);
     BleProto::appendTlvString(infoFrame.data, BleProto::TLV_PROTOCOL_VERSION, "1.0.0");
     BleProto::appendTlvString(infoFrame.data, BleProto::TLV_FIRMWARE_VERSION, "2.1.0");
     BleProto::appendTlvString(infoFrame.data, BleProto::TLV_DEVICE_TYPE, "Radar");
@@ -185,7 +183,6 @@ void updateRadarStatus() {
     BleProto::Frame statusFrame;
     statusFrame.version = BleProto::VERSION;
     statusFrame.cmd = BleProto::CMD_RADAR_STATUS_PUSH;  // 主动推送雷达状态
-    statusFrame.flags = 0;
     statusFrame.seq = 0;
     statusFrame.data.clear();
 
@@ -223,22 +220,18 @@ void setNetworkStatus(NetworkStatus status) {
 void clearStoredConfig() {
     Serial.println("🧹 开始清除存储的配置...");
 
-    uint16_t oldDeviceId = preferences.getUShort("deviceId", 0);//获取当前设备ID
-
-    preferences.remove("deviceId");
     preferences.remove("wifi_first");
 
     wifiManager.clearAllConfigs();//清除所有WiFi配置
 
     Serial.println("✅ 配置已清除完成");
-    Serial.printf("🗑️ 被清除的设备ID: %u\n", oldDeviceId);
 
     WiFi_Connect_First_bit = 1;//设置WiFi连接首次标志位为1
 
     WiFi.disconnect(true);//断开WiFi连接
     setNetworkStatus(NET_DISCONNECTED);//设置网络状态为断开
 
-    Serial.println("🔄 已清除Flash与内存中的配置，请重新配置WiFi和设备ID");
+    Serial.println("🔄 已清除Flash与内存中的配置，请重新配置WiFi");
 
     if (deviceConnected) {
         updateDeviceInfo();  // b3: 设备信息推送（替代已废弃的 sendStatusToBLE）

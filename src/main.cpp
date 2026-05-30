@@ -13,10 +13,7 @@
 Preferences preferences; // Flash存储对象
 WiFiManager wifiManager; // WiFi管理器对象
 
-uint16_t currentDeviceId = 0000; // 当前设备ID
-
 void checkBootButton();//检查Boot按钮状态
-void loadDeviceId();//加载设备ID
 
 /**
  * @brief 系统初始化函数
@@ -31,7 +28,6 @@ void setup() {
     esp_task_wdt_init(30, true);            // 初始化看门狗定时器
     esp_task_wdt_add(NULL);                 // 将主任务添加到看门狗
     preferences.begin("radar_data", false);  // 初始化Flash存储
-    loadDeviceId();                         // 加载设备ID
     initRadarManager();                     // 初始化雷达管理器
     initOtaManager();                       // 初始化OTA管理器
     initAllTasks();                         // 创建所有FreeRTOS任务
@@ -66,17 +62,4 @@ void checkBootButton() {
     }
 }
 
-/**
- * @brief 加载设备ID
- * 从Flash中读取保存的设备ID，如果Flash中没有则使用默认值1001并保存
- */
-void loadDeviceId() {
-  if (preferences.isKey("deviceId")) {
-    currentDeviceId = preferences.getUShort("deviceId", 1001);
-  } else {
-    currentDeviceId = 1001;
-    preferences.putUShort("deviceId", currentDeviceId);
-    Serial.printf("Flash中无设备ID，使用默认值1001并保存\n");
-  }
-  Serial.printf("从Flash加载设备ID: %u\n", currentDeviceId);
-}
+

@@ -245,9 +245,8 @@ extern unsigned long lastCheckTime; // 上次检测时间
 
 extern const unsigned long SENSOR_TIMEOUT; // 传感器超时时间
 
-extern uint16_t currentDeviceId; // 当前设备ID
 extern Preferences preferences; // Flash存储对象
-extern WiFiManager wifiManager; // WiFi管理器
+extern WiFiManager wifiManager; // WiFi管理器对象
 
 // BLE请求上下文，用于跟踪异步命令的seq
 struct BleRequestContext {
@@ -285,19 +284,22 @@ void sendRawEchoResponse(const String& rawData);
  * @param resultCode 错误码（如 ERR_PROTO_PARAM_INVALID）
  * @param errorMessage 错误详细说明（可选）
  */
-void sendCommandErrorResponse(uint8_t respCmd, uint8_t seq, uint8_t resultCode, const char* errorMessage = nullptr);
+void sendCommandErrorResponse(uint8_t respCmd, uint8_t seq, uint8_t resultCode);
 
 /**
- * @brief 发送异步流程状态响应
- * 用于多阶段异步流程（如 WiFi 配网、扫描），包含 TLV_STATE/TLV_STEP
- * @param respCmd 响应命令码（如 CMD_WIFI_CONFIG）
- * @param seq 请求的序列号
- * @param resultCode 结果码（SUCCESS 或 ERR_XXX）
- * @param state 流程状态（PROCESSING/SUCCESS/FAILED）
- * @param step 当前步骤（RECEIVED/SCANNING/CONNECTING 等）
- * @param errorMessage 错误详细说明（可选）
+ * @brief 发送设备状态推送（b3 通道）
+ * 用于设备状态变化时主动推送，与命令响应解耦
+ * @param status 设备状态码（见 BleProto::DeviceStatus）
+ * @param message 可选的状态描述
  */
-void sendAsyncStateResponse(uint8_t respCmd, uint8_t seq, uint8_t resultCode, uint8_t state, uint8_t step, const char* errorMessage = nullptr);
+void sendDeviceStatusToBLE(uint8_t status);
+
+/**
+ * @brief 推送设备状态变化（b3 通道，带去重）
+ * 只有状态真正变化时才推送，避免重复推送
+ * @param status 设备状态码（见 BleProto::DeviceStatus）
+ */
+void pushDeviceStatusIfChanged(uint8_t status);
 
 // ---- BLE 命令处理函数 (被 processBLEConfig 分派) ----
 bool processEchoRequest(const BleProto::Frame& frame);         // CMD_PING (0x01)
@@ -305,7 +307,6 @@ bool processQueryStatus(const BleProto::Frame& frame);         // CMD_QUERY_STAT
 bool processQueryRadarData(const BleProto::Frame& frame);      // CMD_QUERY_RADAR (0x12)
 bool processStartContinuousSend(const BleProto::Frame& frame); // CMD_START_CONTINUOUS (0x14)
 bool processStopContinuousSend(const BleProto::Frame& frame);  // CMD_STOP_CONTINUOUS (0x16)
-bool processSetDeviceId(const BleProto::Frame& frame);         // CMD_SET_DEVICE_ID (0x30)
 bool processWiFiConfigCommand(const BleProto::Frame& frame);   // CMD_WIFI_CONFIG (0x22)
 bool processScanWiFi(const BleProto::Frame& frame);            // CMD_WIFI_SCAN (0x20)
 bool processGetSavedNetworks(const BleProto::Frame& frame);    // CMD_GET_SAVED_WIFI (0x24)
@@ -314,10 +315,10 @@ bool processRadarSleepQuery(const BleProto::Frame& frame);  // CMD_RADAR_SLEEP_Q
 void processBLEConfig();                                        // 主分派入口
 
 // ---- WiFi 异步结果推送 (纯TLV) ----
-void sendWiFiConfigResultToBLE(uint8_t resultCode, uint8_t state, uint8_t step,
-                               const String& message = "", const String& ssid = "", const String& ipAddress = "");
-void sendWiFiScanResultToBLE(uint8_t resultCode, uint8_t state, uint8_t step,
-                             const String& message = "", const std::vector<WiFiScanResult>& networks = {});
+void sendWiFiConfigResultToBLE(uint8_t resultCode,
+                              const String& ssid = "", const String& ipAddress = "");
+void sendWiFiScanResultToBLE(uint8_t resultCode,
+                            const std::vector<WiFiScanResult>& networks = {});
 void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult>& networks = {});
 
 bool sendDailyDataToInfluxDB(String dailyDataLine);// 发送每日数据到InfluxDB，参数是符合InfluxDB Line Protocol格式的字符串

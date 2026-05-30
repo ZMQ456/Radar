@@ -11,13 +11,6 @@ static const uint8_t SOF1 = 0xAA;//帧头
 static const uint8_t SOF2 = 0x55;//帧头
 static const uint8_t VERSION = 0x01;//协议版本
 
-// flags
-static const uint8_t FLAG_NONE = 0x00;       // 无标志位（正常响应）
-static const uint8_t FLAG_FRAGMENT = 0x01;   // 是否为分片（没）
-static const uint8_t FLAG_NEED_ACK = 0x02;   // 需要ACK确认（没）
-static const uint8_t FLAG_IS_ACK = 0x04;     // 是ACK确认包（没）
-static const uint8_t FLAG_IS_ERROR = 0x08;   // 是否为错误
-
 // ==================== 命令码定义 ====================
 // 范围分配：系统 0x01-0x0F | 雷达/传感器 0x10-0x1F | WiFi 0x20-0x2F | 设备 0x30-0x3F | 通用 0x7E-0x7F
 //
@@ -48,20 +41,14 @@ enum Command : uint8_t {
     CMD_GET_SAVED_WIFI = 0x24,        // 获取已保存 WiFi 请求/响应（合并）
     CMD_DELETE_SAVED_WIFI = 0x26,     // 删除指定已保存 WiFi 请求/响应（合并）
 
-    // --- 设备配置命令（一问一答）---
-    CMD_SET_DEVICE_ID = 0x30,         // 设置设备 ID 请求/响应（合并）
-
     // --- 通用命令 ---
-    CMD_ERROR_RESP = 0x7E,            // 协议层错误响应（无对应请求）
-    CMD_ACK = 0x7F                    // 确认（无对应请求）
+    CMD_ERROR_RESP = 0x7E             // 协议层错误响应（无对应请求）
 };
 
 // ==================== TLV 类型码定义 ====================
 enum TlvType : uint8_t {
     // --- 设备信息 (0x01-0x0F) ---
-    TLV_DEVICE_ID = 0x01,//设备ID
     TLV_RESULT_CODE = 0x02,//结果码
-    TLV_ERROR_MESSAGE = 0x03,//错误信息
     TLV_TIMESTAMP = 0x04,//时间戳
     TLV_PROTOCOL_VERSION = 0x05,//协议版本
     TLV_DEVICE_SN = 0x06,//设备序列号 uint64（仅当存在时发送，不用 MAC 替代）
@@ -93,25 +80,19 @@ enum TlvType : uint8_t {
     // --- 控制参数 (0x30-0x3F) ---
     TLV_INTERVAL_MS = 0x31,           // 间隔时间（毫秒）
     TLV_RADAR_SLEEP_ENABLED = 0x32,   // 雷达睡眠查询开关 uint8（0=关闭，1=开启）
+    TLV_DEVICE_STATUS = 0x33,         // 设备状态 uint8（用于 b3 推送）
+    TLV_WIFI_STATUS = 0x34,          // WiFi 状态 uint8（用于查询响应）
+    TLV_MQTT_STATUS = 0x35,          // MQTT 状态 uint8（用于查询响应）
+    TLV_RADAR_SLEEP_STATUS = 0x36,   // 雷达睡眠查询状态 uint8（用于查询响应）
     
 
 
     // --- 通用消息 (0x40-0x4F) ---
-    TLV_MESSAGE = 0x40,//消息
     TLV_IP_ADDRESS = 0x41,//IP地址
     TLV_WIFI_CONFIGURED = 0x42,//WiFi配置
     TLV_WIFI_CONNECTED = 0x43,//WiFi连接
     TLV_ECHO_CONTENT = 0x44,//回显内容
     
-    // --- 异步流程状态字段（仅用于多阶段流程，如 WiFi 配网/扫描）---
-    // 使用规则：
-    // - 即时命令响应：只用 TLV_RESULT_CODE，错误时加 FLAG_IS_ERROR 和可选 TLV_ERROR_MESSAGE
-    // - 异步多阶段流程：保留 TLV_STATE/TLV_STEP/TLV_REASON（如 WiFi 配网、扫描）
-    // - 主动推送/普通数据响应：通常只需 TLV_RESULT_CODE = SUCCESS，甚至可省略
-    TLV_STATE = 0x45,//状态 uint8（仅用于异步流程，如 PROCESSING/SUCCESS/FAILED）
-    TLV_STEP = 0x46,//步骤 uint8（仅用于异步流程，如 RECEIVED/SCANNING/CONNECTING）
-    TLV_REASON = 0x47,//原因码 uint8（仅用于异步流程失败原因）
-
     // --- 波形数据 (0x60-0x6F) ---
     TLV_HEART_WAVEFORM = 0x60,  // 心跳波形 uint8, 原始int8+128偏移
     TLV_BREATH_WAVEFORM = 0x61, // 呼吸波形 uint8, 原始int8+128偏移
@@ -131,8 +112,8 @@ namespace ErrorCode {
     constexpr uint8_t ERR_PROTO_PARAM_INVALID = 0x15;  // 参数非法
     constexpr uint8_t ERR_PROTO_BUSY = 0x16;           // 设备忙
     constexpr uint8_t ERR_PROTO_FRAME_TOO_LARGE = 0x18; // 命令帧过大（超过缓冲区限制）
-    
-    // WiFi错误 (0x2_)
+
+        // WiFi错误 (0x2_)
     constexpr uint8_t ERR_WIFI_SCAN_TIMEOUT = 0x20;      // 扫描超时
     constexpr uint8_t ERR_WIFI_SSID_NOT_FOUND = 0x21;    // 找不到SSID
     constexpr uint8_t ERR_WIFI_WRONG_PASSWORD = 0x22;    // 密码错误
@@ -145,20 +126,23 @@ namespace ErrorCode {
     constexpr uint8_t ERR_DEV_QUEUE_FULL = 0x42;         // 队列已满
 }
 
-// 状态枚举
-namespace State {
-    constexpr uint8_t IDLE = 0x00;        // 空闲
-    constexpr uint8_t PROCESSING = 0x01;  // 处理中
-    constexpr uint8_t SUCCESS = 0x02;     // 成功
-    constexpr uint8_t FAILED = 0x03;      // 失败
-}
-
-// 步骤枚举
-namespace Step {
-    constexpr uint8_t RECEIVED = 0x01;       // 已接收
-    constexpr uint8_t SCANNING = 0x02;       // 扫描中
-    constexpr uint8_t CONNECTING_AP = 0x03;  // 连接AP
-    constexpr uint8_t COMPLETED = 0x05;      // 完成
+// 设备状态码（用于 b3 状态推送通道，与命令响应解耦）
+namespace DeviceStatus {
+    // WiFi 状态
+    constexpr uint8_t WIFI_DISCONNECTED = 0x10;   // WiFi 断开
+    constexpr uint8_t WIFI_CONNECTING = 0x11;     // WiFi 连接中
+    constexpr uint8_t WIFI_CONNECTED = 0x12;      // WiFi 已连接
+    constexpr uint8_t WIFI_FAILED = 0x13;         // WiFi 连接失败
+    
+    // MQTT 状态（加前缀避免与 PubSubClient 宏冲突）
+    constexpr uint8_t DEV_MQTT_DISCONNECTED = 0x20;   // MQTT 断开
+    constexpr uint8_t DEV_MQTT_CONNECTING = 0x21;     // MQTT 连接中
+    constexpr uint8_t DEV_MQTT_CONNECTED = 0x22;      // MQTT 已连接
+    constexpr uint8_t DEV_MQTT_FAILED = 0x23;         // MQTT 连接失败
+    
+    // 雷达状态
+    constexpr uint8_t RADAR_SLEEP_QUERY_DISABLED = 0x30;  // 雷达睡眠/综合状态查询已关闭
+    constexpr uint8_t RADAR_SLEEP_QUERY_ENABLED = 0x31;   // 雷达睡眠/综合状态查询已开启
 }
 
 // WiFi安全类型枚举
@@ -175,7 +159,6 @@ enum WifiSecurityType : uint8_t {
 struct Frame {
     uint8_t version = VERSION;//协议版本
     uint8_t cmd = 0;//命令在数据帧中表示具体的操作类型，如查询状态、配置WiFi等
-    uint8_t flags = 0;//标志位
     uint8_t seq = 0;//序列号
     std::vector<uint8_t> data;//数据
 };

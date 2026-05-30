@@ -14,6 +14,8 @@ extern Preferences preferences;
 extern WiFiManager wifiManager;// WiFi管理器
 extern String getDeviceMacAddress();// 获取设备MAC地址
 
+// 设备状态推送函数（b3 通道，带去重）
+void pushDeviceStatusIfChanged(uint8_t status);
 
 TaskHandle_t mqttTaskHandle = NULL;// MQTT任务句柄
 
@@ -617,7 +619,7 @@ static bool publishPropertyReport(JsonDocument& params, const char* reportType) 
 
     payloadDoc["method"] = "thing.event.property.post";
 
-    params["deviceId"] = String((unsigned long long)device_sn);
+    params["deviceId"] = getMqttDeviceName();
     params["reportType"] = reportType;
 
     payloadDoc["params"] = params;
@@ -830,6 +832,9 @@ void reconnectMQTT() {
 
     if (connected) {
         Serial.printf("[MQTT] 连接成功, clientId=%s\n", clientId.c_str());
+        
+        // 推送 MQTT 已连接状态（b3 通道）
+        pushDeviceStatusIfChanged(BleProto::DeviceStatus::DEV_MQTT_CONNECTED);
 
         String subTopic = getMqttSubscribeTopic();
         mqttClient.subscribe(subTopic.c_str());
@@ -844,6 +849,8 @@ void reconnectMQTT() {
         publishOtaVersionReport();
     } else {
         Serial.printf("[MQTT] 连接失败, state=%d\n", mqttClient.state());
+        // 推送 MQTT 连接失败状态（b3 通道）
+        pushDeviceStatusIfChanged(BleProto::DeviceStatus::DEV_MQTT_FAILED);
     }
 }
 
@@ -856,14 +863,32 @@ void reconnectMQTT() {
  * - 调用mqttClient.loop()保持心跳和处理消息
  */
 void checkMQTTStatus() {
-    if (!mqttClient.connected() && WiFi.isConnected()) {
-        static unsigned long lastReconnectAttempt = 0;
-        unsigned long now = millis();
-        if (now - lastReconnectAttempt > 5000) {
-            lastReconnectAttempt = now;
-            reconnectMQTT();// 尝试连接MQTT服务器，如果连接成功会订阅相关主题并上报版本信息，如果失败会在下一次检查时再次尝试连接
+    static bool wasConnected = false; // 记录上一次的连接状态
+    
+    // 检测 MQTT 断开（不管 WiFi 状态）
+    if (!mqttClient.connected()) {
+        // 如果之前是连接状态，现在断开了，推送断开状态
+        if (wasConnected) {
+            pushDeviceStatusIfChanged(BleProto::DeviceStatus::DEV_MQTT_DISCONNECTED);
+            wasConnected = false;
+        }
+        
+        // 只有在 WiFi 已连接时才尝试重连
+        if (WiFi.isConnected()) {
+            static unsigned long lastReconnectAttempt = 0;
+            unsigned long now = millis();
+            if (now - lastReconnectAttempt > 5000) {
+                lastReconnectAttempt = now;
+                reconnectMQTT();// 尝试连接MQTT服务器，如果连接成功会订阅相关主题并上报版本信息，如果失败会在下一次检查时再次尝试连接
+            }
         }
     }
+    
+    // 更新连接状态记录
+    if (mqttClient.connected()) {
+        wasConnected = true;
+    }
+    
     mqttClient.loop();// 处理MQTT消息，保持连接活跃，确保能够及时接收平台下发的指令和OTA升级消息
 }
 

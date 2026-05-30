@@ -6,15 +6,41 @@
 extern bool deviceConnected;// 设备是否已连接到WiFi网络标志
 void setNetworkStatus(NetworkStatus status);// 设置网络状态
 
-// WiFi专用TLV发送函数声明（新签名：直接传 resultCode/state/step）
+// 设备状态推送函数（b3 通道，带去重）
+void pushDeviceStatusIfChanged(uint8_t status);
+
+// WiFi专用TLV发送函数声明（简化签名：只传 resultCode）
 // 发送WiFi配置结果到BLE
-void sendWiFiConfigResultToBLE(uint8_t resultCode, uint8_t state, uint8_t step,
-                               const String& message = "", const String& ssid = "", const String& ipAddress = "");
+void sendWiFiConfigResultToBLE(uint8_t resultCode,
+                               const String& ssid = "", const String& ipAddress = "");
 // 发送WiFi扫描结果到BLE
-void sendWiFiScanResultToBLE(uint8_t resultCode, uint8_t state, uint8_t step,
-                             const String& message = "", const std::vector<WiFiScanResult>& networks = {});
+void sendWiFiScanResultToBLE(uint8_t resultCode,
+                             const std::vector<WiFiScanResult>& networks = {});
 // 发送已保存网络列表结果到BLE
 void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult>& networks = {});
+
+static String getWiFiSecurityString(int encryptionType) {
+    switch (encryptionType) {
+        case WIFI_AUTH_OPEN:
+            return "OPEN";
+        case WIFI_AUTH_WEP:
+            return "WEP";
+        case WIFI_AUTH_WPA_PSK:
+            return "WPA";
+        case WIFI_AUTH_WPA2_PSK:
+            return "WPA2";
+        case WIFI_AUTH_WPA_WPA2_PSK:
+            return "WPA/WPA2";
+        case WIFI_AUTH_WPA2_ENTERPRISE:
+            return "WPA2-EAP";
+        case WIFI_AUTH_WPA3_PSK:
+            return "WPA3";
+        case WIFI_AUTH_WPA2_WPA3_PSK:
+            return "WPA2/WPA3";
+        default:
+            return "UNKNOWN";
+    }
+}
 
 /**
  * @brief WiFi管理器构造函数
@@ -55,23 +81,38 @@ void WiFiManager::begin() {
         switch (event) {
             case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
                 Serial.println("⚠️ [WiFi事件] WiFi断开连接");
+                // 根据当前状态推送不同的状态码
                 if (currentState == WIFI_CONNECTED) {
                     currentState = WIFI_DISCONNECTED;
                     setNetworkStatus(NET_DISCONNECTED);
+                    // 推送 WiFi 断开状态（b3 通道）
+                    pushDeviceStatusIfChanged(BleProto::DeviceStatus::WIFI_DISCONNECTED);
                     Serial.println("🔄 [WiFi事件] 已触发重连标志");
+                } else if (currentState == WIFI_CONNECTING || currentState == WIFI_IDLE) {
+                    // 连接中或空闲时断开，视为连接失败
+                    currentState = WIFI_DISCONNECTED;
+                    setNetworkStatus(NET_DISCONNECTED);
+                    // 推送 WiFi 连接失败状态（b3 通道）
+                    pushDeviceStatusIfChanged(BleProto::DeviceStatus::WIFI_FAILED);
                 }
                 break;
                 
             case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+                // 推送 WiFi 连接中状态（b3 通道）
+                pushDeviceStatusIfChanged(BleProto::DeviceStatus::WIFI_CONNECTING);
                 break;
                 
             case ARDUINO_EVENT_WIFI_STA_GOT_IP:
                 currentState = WIFI_CONNECTED;
                 setNetworkStatus(NET_CONNECTED);
+                // 推送 WiFi 已连接状态（b3 通道）
+                pushDeviceStatusIfChanged(BleProto::DeviceStatus::WIFI_CONNECTED);
                 break;
                 
             case ARDUINO_EVENT_WIFI_STA_LOST_IP:
                 Serial.println("⚠️ [WiFi事件] 丢失IP地址");
+                // 推送 WiFi 断开状态（b3 通道）
+                pushDeviceStatusIfChanged(BleProto::DeviceStatus::WIFI_DISCONNECTED);
                 break;
                 
             default:
@@ -359,13 +400,12 @@ bool WiFiManager::scanAndMatchNetworks() {
                 WiFiScanResult network;
                 network.ssid = WiFi.SSID(i);
                 network.rssi = WiFi.RSSI(i);
-                network.security = "WPA2"; // 简化处理，实际可以通过WiFi.encryptionType(i)获取
+                network.security = getWiFiSecurityString(WiFi.encryptionType(i));//获取WiFi安全类型
                 networks.push_back(network);
             }
         }
         
-        sendWiFiScanResultToBLE(BleProto::ErrorCode::SUCCESS, BleProto::State::SUCCESS, BleProto::Step::COMPLETED,
-                                "重连扫描完成", networks);
+        sendWiFiScanResultToBLE(BleProto::ErrorCode::SUCCESS, networks);
         Serial.printf("📱 [BLE] 发送重连扫描结果，共 %d 个网络\n", static_cast<int>(networks.size()));
     }
     
@@ -496,8 +536,7 @@ void WiFiManager::scanAndSendResults() {
     if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         Serial.println("⏸️ [scanAndSendResults] WiFi正在被其他操作占用，跳过扫描");
         if (deviceConnected) {
-            sendWiFiScanResultToBLE(BleProto::ErrorCode::ERR_WIFI_BUSY, BleProto::State::FAILED, BleProto::Step::SCANNING,
-                                    "WiFi正在被其他操作占用，请稍后再试", {});
+            sendWiFiScanResultToBLE(BleProto::ErrorCode::ERR_WIFI_BUSY);
         }
         return;
     }
@@ -513,8 +552,7 @@ void WiFiManager::scanAndSendResults() {
         if (isScanning) {
             Serial.println("⚠️ [WiFi] 等待超时，跳过本次扫描");
             if (deviceConnected) {
-                sendWiFiScanResultToBLE(BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT, BleProto::State::FAILED, BleProto::Step::SCANNING,
-                                        "等待扫描超时，请稍后再试", {});
+                sendWiFiScanResultToBLE(BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT);
             }
             xSemaphoreGive(wifiMutex);
             return;
@@ -562,8 +600,7 @@ void WiFiManager::scanAndSendResults() {
         Serial.println("❌ 未扫描到任何WiFi网络或扫描失败");
         isScanning = false;
         if (deviceConnected) {
-            sendWiFiScanResultToBLE(BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT, BleProto::State::FAILED, BleProto::Step::SCANNING,
-                                    "未扫描到任何WiFi网络或扫描失败", {});
+            sendWiFiScanResultToBLE(BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT);
         }
         xSemaphoreGive(wifiMutex);
         return;
@@ -576,37 +613,7 @@ void WiFiManager::scanAndSendResults() {
             WiFiScanResult network;
             network.ssid = WiFi.SSID(i);
             network.rssi = WiFi.RSSI(i);
-            
-            // 根据加密类型设置安全类型
-            switch (WiFi.encryptionType(i)) {
-                case WIFI_AUTH_OPEN:
-                    network.security = "OPEN";
-                    break;
-                case WIFI_AUTH_WEP:
-                    network.security = "WEP";
-                    break;
-                case WIFI_AUTH_WPA_PSK:
-                    network.security = "WPA";
-                    break;
-                case WIFI_AUTH_WPA2_PSK:
-                    network.security = "WPA2";
-                    break;
-                case WIFI_AUTH_WPA_WPA2_PSK:
-                    network.security = "WPA/WPA2";
-                    break;
-                case WIFI_AUTH_WPA2_ENTERPRISE:
-                    network.security = "WPA2-EAP";
-                    break;
-                case WIFI_AUTH_WPA3_PSK:
-                    network.security = "WPA3";
-                    break;
-                case WIFI_AUTH_WPA2_WPA3_PSK:
-                    network.security = "WPA2/WPA3";
-                    break;
-                default:
-                    network.security = "UNKNOWN";
-                    break;
-            }
+            network.security = getWiFiSecurityString(WiFi.encryptionType(i));
             networks.push_back(network);
         }
     }
@@ -617,8 +624,7 @@ void WiFiManager::scanAndSendResults() {
     isScanning = false;
     
     if (deviceConnected) {
-        sendWiFiScanResultToBLE(BleProto::ErrorCode::SUCCESS, BleProto::State::SUCCESS, BleProto::Step::COMPLETED,
-                                "扫描完成", networks);
+        sendWiFiScanResultToBLE(BleProto::ErrorCode::SUCCESS, networks);
     }
     
     xSemaphoreGive(wifiMutex);
@@ -636,8 +642,7 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
     if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         Serial.println("⏸️ [handleConfigurationData] WiFi正在被其他操作占用，跳过配网");
         if (deviceConnected) {
-            sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_BUSY, BleProto::State::FAILED, BleProto::Step::RECEIVED,
-                                      "WiFi正在被其他操作占用，请稍后再试");
+            sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_BUSY);
         }
         return false;
     }
@@ -705,8 +710,7 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
         if (isScanning) {
             Serial.println("⚠️ [WiFi] 等待超时");
             if (deviceConnected) {
-                sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT, BleProto::State::FAILED, BleProto::Step::SCANNING,
-                                          "等待扫描超时，请稍后再试");
+                sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_SCAN_TIMEOUT);
             }
             manualConfigActive = false;
             xSemaphoreGive(wifiMutex);
@@ -757,8 +761,7 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
         currentState = WIFI_DISCONNECTED;
         
         if (deviceConnected) {
-            sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_SSID_NOT_FOUND, BleProto::State::FAILED, BleProto::Step::SCANNING,
-                                      "未扫描到任何WiFi网络，请检查设备位置");
+            sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_SSID_NOT_FOUND);
         }
         vTaskDelay(3000 / portTICK_PERIOD_MS);
         manualConfigActive = false;
@@ -792,14 +795,12 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
         if (signalTooWeak) {
             Serial.printf("❌ 目标WiFi信号过弱: %d dBm (阈值: %d dBm)\n", foundRssi, MIN_RSSI_THRESHOLD);
             if (deviceConnected) {
-                sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_SIGNAL_WEAK, BleProto::State::FAILED, BleProto::Step::SCANNING,
-                                          "目标WiFi信号过弱，请将设备靠近路由器");
+                sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_SIGNAL_WEAK);
             }
         } else {
             Serial.println("❌ 未找到目标WiFi网络");
             if (deviceConnected) {
-                sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_SSID_NOT_FOUND, BleProto::State::FAILED, BleProto::Step::SCANNING,
-                                          "未找到目标WiFi网络，请检查WiFi名称是否正确");
+                sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_SSID_NOT_FOUND);
             }
         }
         
@@ -828,8 +829,8 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
             Serial.println("✅ WiFi配置成功并已保存");
             
             if (deviceConnected) {
-                sendWiFiConfigResultToBLE(BleProto::ErrorCode::SUCCESS, BleProto::State::SUCCESS, BleProto::Step::COMPLETED,
-                                          "WiFi配置成功", ssid, WiFi.localIP().toString());
+                sendWiFiConfigResultToBLE(BleProto::ErrorCode::SUCCESS,
+                                          ssid, WiFi.localIP().toString());
             }
             manualConfigActive = false;
             xSemaphoreGive(wifiMutex);
@@ -847,8 +848,7 @@ bool WiFiManager::handleConfigurationData(const char* ssid, const char* password
     }
     
     if (deviceConnected) {
-        sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_WRONG_PASSWORD, BleProto::State::FAILED, BleProto::Step::CONNECTING_AP,
-                                  "WiFi配置失败，请检查密码是否正确");
+        sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_WRONG_PASSWORD);
     }
     vTaskDelay(3000 / portTICK_PERIOD_MS);
     manualConfigActive = false;

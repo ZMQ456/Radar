@@ -41,12 +41,12 @@ bool FrameParser::tryParseOne(Frame& outFrame) {
         buffer.erase(buffer.begin());//如果前两个字节不是帧头，就丢弃第一个字节，继续检查下一个位置
     }
 
-    if (buffer.size() < 10) {
-        return false;//最小帧长度为10字节（2字节帧头 + 1字节版本 + 1字节命令 + 1字节标志 + 1字节序列号 + 2字节数据长度 + 0字节数据 + 2字节CRC）
+    if (buffer.size() < 9) {
+        return false;//最小帧长度为9字节（2字节帧头 + 1字节版本 + 1字节命令 + 1字节序列号 + 2字节数据长度 + 0字节数据 + 2字节CRC）
     }
 
-    uint16_t dataLen = readBe16(&buffer[6]);//从缓冲区中读取数据长度字段（大端格式）
-    size_t fullLen = 2 + 1 + 1 + 1 + 1 + 2 + dataLen + 2;
+    uint16_t dataLen = readBe16(&buffer[5]);//从缓冲区中读取数据长度字段（大端格式）
+    size_t fullLen = 2 + 1 + 1 + 1 + 2 + dataLen + 2;
     if (buffer.size() < fullLen) {
         return false;//如果缓冲区中的数据不足以构成完整的一帧，就等待更多数据的输入
     }
@@ -60,9 +60,8 @@ bool FrameParser::tryParseOne(Frame& outFrame) {
 
     outFrame.version = buffer[2];//版本字段位于缓冲区的第3个字节（索引2）
     outFrame.cmd = buffer[3];//命令字段位于缓冲区的第4个字节（索引3）
-    outFrame.flags = buffer[4];//标志字段位于缓冲区的第5个字节（索引4）
-    outFrame.seq = buffer[5];//序列号字段位于缓冲区的第6个字节（索引5）
-    outFrame.data.assign(buffer.begin() + 8, buffer.begin() + 8 + dataLen);//数据字段从缓冲区的第9个字节开始（索引8），长度为dataLen字节
+    outFrame.seq = buffer[4];//序列号字段位于缓冲区的第5个字节（索引4）
+    outFrame.data.assign(buffer.begin() + 7, buffer.begin() + 7 + dataLen);//数据字段从缓冲区的第8个字节开始（索引7），长度为dataLen字节
 
     buffer.erase(buffer.begin(), buffer.begin() + fullLen);
     return true;
@@ -200,7 +199,6 @@ std::vector<uint8_t> encodeFrame(const Frame& frame) {
     out.push_back(SOF2);
     out.push_back(frame.version);//添加协议版本
     out.push_back(frame.cmd);//添加命令
-    out.push_back(frame.flags);//添加标志位
     out.push_back(frame.seq);//添加序列号
     appendU16(out, static_cast<uint16_t>(frame.data.size()));//添加数据长度
     out.insert(out.end(), frame.data.begin(), frame.data.end());//添加数据部分
