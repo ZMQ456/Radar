@@ -122,7 +122,6 @@ TYPE(1) LEN_H(1) LEN_L(1) VALUE(N)
 | TLV | 值 | 类型 | 说明 |
 | --- | --- | --- | --- |
 | `TLV_RESULT_CODE` | `0x02` | `uint8` | 结果码 |
-| `TLV_TIMESTAMP` | `0x04` | `uint32` | 时间戳，通常为 `millis()` |
 | `TLV_PROTOCOL_VERSION` | `0x05` | `string` | 协议版本 |
 | `TLV_DEVICE_SN` | `0x06` | `uint64` | 设备序列号，仅存在时发送 |
 | `TLV_FIRMWARE_VERSION` | `0x07` | `string` | 固件版本 |
@@ -144,7 +143,6 @@ TYPE(1) LEN_H(1) LEN_L(1) VALUE(N)
 | `TLV_BREATH_RATE_X10` | `0x11` | `uint16` | 呼吸率乘 10 |
 | `TLV_PRESENCE` | `0x12` | `uint8` | 是否存在人体 |
 | `TLV_MOTION` | `0x13` | `uint8` | 运动状态 |
-| `TLV_SLEEP_STATE` | `0x14` | `uint8` | 睡眠状态 |
 | `TLV_DISTANCE_CM` | `0x15` | `uint16` | 距离，单位 cm |
 | `TLV_POS_X_MM` | `0x16` | `int16` | X 坐标，单位 mm |
 | `TLV_POS_Y_MM` | `0x17` | `int16` | Y 坐标，单位 mm |
@@ -311,7 +309,6 @@ TLV_RESULT_CODE = SUCCESS 或 ERR_XXX
 响应 TLV：
 
 - `TLV_RESULT_CODE`
-- `TLV_TIMESTAMP`
 - `TLV_PRESENCE`
 - `TLV_HEART_RATE_X10`
 - `TLV_BREATH_RATE_X10`
@@ -321,8 +318,6 @@ TLV_RESULT_CODE = SUCCESS 或 ERR_XXX
 - `TLV_POS_Y_MM`
 - `TLV_POS_Z_MM`
 - `TLV_BODY_MOVEMENT`
-
-当前固件未在 `CMD_QUERY_RADAR` 响应中发送 `TLV_SLEEP_STATE`。该 TLV 类型保留在协议定义中，但客户端不应依赖此命令返回睡眠状态。
 
 ### 10.3 `CMD_WIFI_SCAN`
 
@@ -461,18 +456,14 @@ cmd = CMD_CONTINUOUS_PUSH (0x18)
 seq = 设备侧自增或固定策略
 ```
 
-当前固件实际发送 TLV：
+常见 TLV：
 
+- `TLV_TIMESTAMP`
 - `TLV_PRESENCE`
 - `TLV_HEART_RATE_X10`
 - `TLV_BREATH_RATE_X10`
 - `TLV_MOTION`
-
-以下 TLV 类型保留在协议定义中，但当前固件的 `a1` 连续推送未发送：
-
-- `TLV_TIMESTAMP`
 - `TLV_DISTANCE_CM`
-- `TLV_SLEEP_STATE`
 - `TLV_HEART_WAVEFORM`
 - `TLV_BREATH_WAVEFORM`
 

@@ -10,8 +10,8 @@
 // ==================== 串口配置 ====================
 // 雷达传感器串口 (UART2)
 #define RADAR_UART_NUM         UART_NUM_2
-#define RADAR_RX_PIN           16          // 接收引脚
-#define RADAR_TX_PIN           17          // 发送引脚
+#define RADAR_RX_PIN           11          // 接收引脚
+#define RADAR_TX_PIN           10          // 发送引脚
 #define RADAR_BAUD_RATE        115200      // 波特率
 
 // 调试串口 (USB)

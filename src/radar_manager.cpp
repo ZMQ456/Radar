@@ -1906,10 +1906,10 @@ void processBLEConfig() {
                     processStopContinuousSend(frame);  // 停止持续发送，幂等操作
                     break;
                 case BleProto::CMD_WIFI_CONFIG:
-                    processWiFiConfigCommand(frame);  // WiFi 配网，多阶段异步流程
+                    processWiFiConfigCommand(frame);  // WiFi 配网
                     break;
                 case BleProto::CMD_WIFI_SCAN:
-                    processScanWiFi(frame);  // WiFi 扫描，多阶段异步流程
+                    processScanWiFi(frame);  // WiFi 扫描命令，无参数，异步返回扫描结果
                     break;
                 case BleProto::CMD_GET_SAVED_WIFI:
                     processGetSavedNetworks(frame);  // 获取已保存 WiFi 列表，无参数
@@ -2062,11 +2062,11 @@ bool processWiFiConfigCommand(const BleProto::Frame& frame) {
         ackFrame.cmd = BleProto::CMD_WIFI_CONFIG;
         ackFrame.seq = frame.seq;
         BleProto::appendTlvU8(ackFrame.data, BleProto::TLV_RESULT_CODE, BleProto::ErrorCode::PROCESSING);
-        BleProto::appendTlvString(ackFrame.data, BleProto::TLV_SSID, newSSID);
+        BleProto::appendTlvString(ackFrame.data, BleProto::TLV_SSID, newSSID);// 可选：回显 SSID，方便小程序确认配置内容
         sendFrameToBLE(ackFrame, deviceResultCharacteristic);
     }
 
-    // 启动异步配网流程（结果通过 sendWiFiConfigResultToBLE 异步回包）
+    // 调用 WiFiManager 处理配置数据，后续结果通过 wifiConfigResultHandler 回包
     wifiManager.handleConfigurationData(newSSID.c_str(), newPassword.c_str());
     return true;
 }
