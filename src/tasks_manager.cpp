@@ -49,7 +49,7 @@ void saveDeviceSn() {
 
 /**
  * @brief 构建BLE厂商数据
- * 构造BLE广播厂商数据，包含FF FF标识和SN哈希值
+ * 构造BLE广播厂商数据
  * @return 9字节厂商数据字符串
  */
 std::string buildBLEManufacturerData() {
@@ -106,7 +106,7 @@ void refreshBLEAdvertisingData() {
     pAdvertising->setScanResponseData(scanResponseData);//设置扫描响应数据
     pAdvertising->setScanResponse(true);//设置扫描响应
     pAdvertising->setMinPreferred(0x06);//设置最小优先级
-    pAdvertising->setMinPreferred(0x12);//设置最小优先级
+    pAdvertising->setMinPreferred(0x12);//设置最小优先级                                                          
 
     Serial.printf("📡 [BLE] 已刷新广播 ManufacturerData, device_sn=%llu\n", device_sn);
 }

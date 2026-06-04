@@ -21,17 +21,17 @@ extern WiFiManager wifiManager;//WiFi管理器对象
 extern bool continuousSendEnabled;//是否启用连续发送数据到MQTT的标志
 extern unsigned long continuousSendInterval;//连续发送数据到MQTT的时间间隔，单位为毫秒
 
-extern const char* mqttServer;
-extern const int mqttPort;
-extern const char* mqttProductKey;
-extern const char* mqttDeviceModel;
-extern const char* mqttProductSecret;
-extern String deviceMacAddress;
+extern const char* mqttServer;//MQTT服务器地址
+extern const int mqttPort;//MQTT服务器端口
+extern const char* mqttProductKey;//MQTT产品Key
+extern const char* mqttDeviceModel;//MQTT设备型号
+extern const char* mqttProductSecret;//MQTT产品Secret
+extern String deviceMacAddress;//设备MAC地址字符串
 
-extern WiFiClient mqttWiFiClient;
-extern PubSubClient mqttClient;
+extern WiFiClient mqttWiFiClient;//MQTT使用的WiFi客户端对象
+extern PubSubClient mqttClient;//MQTT客户端对象
 
-extern TaskHandle_t mqttTaskHandle;
+extern TaskHandle_t mqttTaskHandle;//MQTT任务句柄
 
 void mqttTask(void *parameter);//MQTT任务函数
 String getMqttDeviceName();//获取MQTT设备名称

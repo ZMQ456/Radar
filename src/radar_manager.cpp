@@ -80,6 +80,19 @@ SemaphoreHandle_t bleSendMutex; // BLE发送互斥锁
 BleProto::FrameParser bleFrameParser; // BLE帧解析器（TLV协议）
 uint8_t bleSequenceCounter = 0;       // BLE出站帧序列号计数器
 
+static bool isBleNotifySubscribed(BLECharacteristic* pChar) {
+    if (pChar == nullptr) {
+        return false;
+    }
+
+    BLEDescriptor* descriptor = pChar->getDescriptorByUUID(BLEUUID((uint16_t)0x2902));
+    if (descriptor == nullptr) {
+        return false;
+    }
+
+    return static_cast<BLE2902*>(descriptor)->getNotifications();
+}
+
 // BLE MTU 协商相关变量
 size_t g_blePayloadSize = FALLBACK_PAYLOAD;
 
@@ -898,6 +911,49 @@ void updateRefusedTime();
  * 从队列中获取生命体征数据并发送到InfluxDB数据库
  * @param parameter 任务参数（未使用）
  */
+static void appendInfluxField(String& line, bool& firstField, const String& field) {
+    if (!firstField) {
+        line += ",";
+    }
+    line += field;
+    firstField = false;
+}
+
+static bool sendVitalDailyDataToInfluxDB(const VitalData& data) {
+    String macAddress = getDeviceMacAddress();
+    String dailyDataLine = "daily_data,deviceId=" + macAddress + ",dataType=daily ";
+    bool firstField = true;
+
+    if (data.heart_rate > 0) {
+        appendInfluxField(dailyDataLine, firstField, "heartRate=" + String(data.heart_rate, 1));
+    }
+
+    if (data.breath_rate > 0) {
+        appendInfluxField(dailyDataLine, firstField, "breathingRate=" + String(data.breath_rate, 1));
+    }
+
+    appendInfluxField(dailyDataLine, firstField, "personDetected=" + String(data.presence) + "i");
+    appendInfluxField(dailyDataLine, firstField, "humanActivity=" + String(data.motion) + "i");
+    appendInfluxField(dailyDataLine, firstField, "bodyMovement=" + String((int)data.body_movement) + "i");
+
+    if (data.distance > 0) {
+        appendInfluxField(dailyDataLine, firstField, "humanDistance=" + String(data.distance) + "i");
+    }
+
+    appendInfluxField(dailyDataLine, firstField, "sleepState=" + String(data.sleep_state) + "i");
+    appendInfluxField(dailyDataLine, firstField, "humanPositionX=" + String(data.pos_x) + "i");
+    appendInfluxField(dailyDataLine, firstField, "humanPositionY=" + String(data.pos_y) + "i");
+    appendInfluxField(dailyDataLine, firstField, "humanPositionZ=" + String(data.pos_z) + "i");
+    appendInfluxField(dailyDataLine, firstField, "heartbeatWaveform=" + String((int)data.heartbeat_waveform) + "i");
+    appendInfluxField(dailyDataLine, firstField, "breathingWaveform=" + String((int)data.breathing_waveform) + "i");
+    appendInfluxField(dailyDataLine, firstField, "abnormalState=" + String(data.abnormal_state) + "i");
+    appendInfluxField(dailyDataLine, firstField, "bedStatus=" + String(data.bed_status) + "i");
+    appendInfluxField(dailyDataLine, firstField, "struggleAlert=" + String(data.struggle_alert) + "i");
+    appendInfluxField(dailyDataLine, firstField, "noOneAlert=" + String(data.no_one_alert) + "i");
+
+    return !firstField && sendDailyDataToInfluxDB(dailyDataLine);
+}
+
 void vitalSendTask(void *parameter) {
     Serial.println("🔁🔁 生命体征数据发送任务启动（WiFi数据库传输）");
     
@@ -989,81 +1045,8 @@ void vitalSendTask(void *parameter) {
                         Serial.printf("📡 发送数据 - 心率:%.1f, 呼吸:%.1f, 距离:%d\n",
                             vitalData.heart_rate, vitalData.breath_rate, vitalData.distance);
                     
-                    String macAddress = getDeviceMacAddress();
-                    String dailyDataLine = "daily_data,deviceId=" + macAddress + ",dataType=daily ";
-                    
-                    bool firstField = true;
-                    
-                    if (vitalData.heart_rate > 0) {
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "heartRate=" + String(vitalData.heart_rate, 1);
-                        firstField = false;
-                    }
-                    
-                    if (vitalData.breath_rate > 0) {
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "breathingRate=" + String(vitalData.breath_rate, 1);
-                        firstField = false;
-                    }
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "personDetected=" + String(vitalData.presence) + "i";
-                    firstField = false;
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "humanActivity=" + String(vitalData.motion) + "i";
-                    firstField = false;
-                    
-                    if (vitalData.distance > 0) {
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "humanDistance=" + String(vitalData.distance) + "i";
-                        firstField = false;
-                    }
-                    
-                    if (vitalData.sleep_state >= 0) {
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "sleepState=" + String(vitalData.sleep_state) + "i";
-                        firstField = false;
-                    }
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "humanPositionX=" + String(vitalData.pos_x) + "i";
-                    firstField = false;
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "humanPositionY=" + String(vitalData.pos_y) + "i";
-                    firstField = false;
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "humanPositionZ=" + String(vitalData.pos_z) + "i";
-                    firstField = false;
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "heartbeatWaveform=" + String((int)sensorData.heart_waveform[0]) + "i";
-                    firstField = false;
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "breathingWaveform=" + String((int)sensorData.breath_waveform[0]) + "i";
-                    firstField = false;
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "abnormalState=" + String(vitalData.abnormal_state) + "i";
-                    firstField = false;
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "bedStatus=" + String(vitalData.bed_status) + "i";
-                    firstField = false;
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "struggleAlert=" + String(vitalData.struggle_alert) + "i";
-                    firstField = false;
-                    
-                    if (!firstField) dailyDataLine += ",";
-                    dailyDataLine += "noOneAlert=" + String(vitalData.no_one_alert) + "i";
-                    firstField = false;
-                    
-                    if (!dailyDataLine.endsWith(" ")) {
-                        bool sendSuccess = sendDailyDataToInfluxDB(dailyDataLine);
+                    {
+                        bool sendSuccess = sendVitalDailyDataToInfluxDB(vitalData);
                         esp_task_wdt_reset();
                         
                         if (sendSuccess) {
@@ -1089,81 +1072,8 @@ void vitalSendTask(void *parameter) {
                         Serial.printf("⏰ 发送缓存数据 - 心率:%.1f, 呼吸:%.1f\n",
                             pendingData.heart_rate, pendingData.breath_rate);
                         
-                        String macAddress = getDeviceMacAddress();
-                        String dailyDataLine = "daily_data,deviceId=" + macAddress + ",dataType=daily ";
-                        
-                        bool firstField = true;
-                        
-                        if (pendingData.heart_rate > 0) {
-                            if (!firstField) dailyDataLine += ",";
-                            dailyDataLine += "heartRate=" + String(pendingData.heart_rate, 1);
-                            firstField = false;
-                        }
-                        
-                        if (pendingData.breath_rate > 0) {
-                            if (!firstField) dailyDataLine += ",";
-                            dailyDataLine += "breathingRate=" + String(pendingData.breath_rate, 1);
-                            firstField = false;
-                        }
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "personDetected=" + String(pendingData.presence) + "i";
-                        firstField = false;
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "humanActivity=" + String(pendingData.motion) + "i";
-                        firstField = false;
-                        
-                        if (pendingData.distance > 0) {
-                            if (!firstField) dailyDataLine += ",";
-                            dailyDataLine += "humanDistance=" + String(pendingData.distance) + "i";
-                            firstField = false;
-                        }
-                        
-                        if (pendingData.sleep_state >= 0) {
-                            if (!firstField) dailyDataLine += ",";
-                            dailyDataLine += "sleepState=" + String(pendingData.sleep_state) + "i";
-                            firstField = false;
-                        }
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "humanPositionX=" + String(pendingData.pos_x) + "i";
-                        firstField = false;
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "humanPositionY=" + String(pendingData.pos_y) + "i";
-                        firstField = false;
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "humanPositionZ=" + String(pendingData.pos_z) + "i";
-                        firstField = false;
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "heartbeatWaveform=" + String((int)pendingData.heartbeat_waveform) + "i";
-                        firstField = false;
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "breathingWaveform=" + String((int)pendingData.breathing_waveform) + "i";
-                        firstField = false;
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "abnormalState=" + String(pendingData.abnormal_state) + "i";
-                        firstField = false;
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "bedStatus=" + String(pendingData.bed_status) + "i";
-                        firstField = false;
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "struggleAlert=" + String(pendingData.struggle_alert) + "i";
-                        firstField = false;
-                        
-                        if (!firstField) dailyDataLine += ",";
-                        dailyDataLine += "noOneAlert=" + String(pendingData.no_one_alert) + "i";
-                        firstField = false;
-                        
-                        if (!dailyDataLine.endsWith(" ")) {
-                            bool sendSuccess = sendDailyDataToInfluxDB(dailyDataLine);
+                        {
+                            bool sendSuccess = sendVitalDailyDataToInfluxDB(pendingData);
                             esp_task_wdt_reset();
                             
                             if (sendSuccess) {
@@ -1348,7 +1258,6 @@ void sendSleepDataToInfluxDB() {
     fields += ",avgHeartRate=" + String((int)sensorData.avg_heart_rate) + "i";
     fields += ",apneaCount=" + String((int)sensorData.apnea_count) + "i";
     fields += ",abnormalState=" + String((int)sensorData.abnormal_state) + "i";
-    fields += ",bodyMovement=" + String((int)sensorData.body_movement) + "i";
     fields += ",breathStatus=" + String((int)sensorData.breath_status) + "i";
     fields += ",sleepState=" + String((int)sensorData.sleep_state) + "i";
     fields += ",largeMoveRatio=" + String((int)sensorData.large_move_ratio) + "i";
@@ -1553,6 +1462,10 @@ void sendFrameToBLE(const BleProto::Frame& frame, BLECharacteristic* pChar) {
     }
 
     if (!deviceConnected || pChar == nullptr) {//连接检查和特征指针检查(指针为空可能是未初始化或已断开连接)
+        xSemaphoreGive(bleSendMutex);
+        return;
+    }
+    if (!isBleNotifySubscribed(pChar)) {
         xSemaphoreGive(bleSendMutex);
         return;
     }
@@ -1805,23 +1718,16 @@ bool processStartContinuousSend(const BleProto::Frame& frame) {
         }
         
         // 检查是否已经在持续发送模式
-        if (continuousSendEnabled) {
-            Serial.println("[警告] 持续发送模式已启动");
-            if (deviceConnected) {
-                sendCommandErrorResponse(
-                    BleProto::CMD_START_CONTINUOUS,
-                    frame.seq,
-                    BleProto::ErrorCode::ERR_PROTO_BUSY
-                );
-            }
-            return true;
-        }
-
+        bool wasEnabled = continuousSendEnabled;
         continuousSendInterval = reqInterval;
         continuousSendEnabled = true;
         bleFlow.reset();
         
-        Serial.printf("⚙️ 启动持续发送模式，间隔: %lu ms\n", continuousSendInterval);
+        if (wasEnabled) {
+            Serial.printf("[BLE] START_CONTINUOUS already enabled, interval updated: %lu ms\n", continuousSendInterval);
+        } else {
+            Serial.printf("[BLE] START_CONTINUOUS enabled, interval: %lu ms\n", continuousSendInterval);
+        }
         
         if (deviceConnected) {
             BleProto::Frame respFrame;
