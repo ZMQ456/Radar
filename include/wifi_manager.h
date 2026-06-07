@@ -13,6 +13,7 @@
 // WiFi扫描结果结构体
 struct WiFiScanResult {
     String ssid;
+    String password; // 仅保存已配置网络的密码，扫描结果中不包含密码
     int rssi;
     String security;// 安全类型字符串，如 "OPEN", "WEP", "WPA", "WPA2", "WPA3"
 };

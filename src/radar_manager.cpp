@@ -2327,6 +2327,7 @@ void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult
         for (const auto& network : networks) {
             std::vector<uint8_t> wifiItem;
             BleProto::appendTlvString(wifiItem, BleProto::TLV_SSID, network.ssid);
+            BleProto::appendTlvString(wifiItem, BleProto::TLV_PASSWORD, network.password);
             BleProto::appendTlvBlock(frame.data, BleProto::TLV_WIFI_ITEM, wifiItem);
         }
     }

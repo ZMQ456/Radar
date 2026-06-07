@@ -1181,7 +1181,8 @@ void WiFiManager::getSavedNetworks() {
     std::vector<WiFiScanResult> networks;
     for (int i = 0; i < savedNetworkCount; i++) {
         WiFiScanResult network;
-        network.ssid = String(savedNetworks[i].ssid);
+        network.ssid = String(savedNetworks[i].ssid);// SSID直接使用保存的值
+        network.password = String(savedNetworks[i].password);// 密码直接使用保存的值
         network.rssi = 0; // 保存的网络不显示RSSI
         network.security = ""; // 保存的网络不显示安全类型
         networks.push_back(network);
