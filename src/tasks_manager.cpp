@@ -332,7 +332,8 @@ void sleepAnalysisTask(void *parameter) {
                     movementData.isValid = (sensorData.body_movement >= 0 && sensorData.body_movement <= 100);
                     movementData.timestamp = currentTime;
 
-                    sleepAnalyzer->update(hrData, rrData, hrvData, movementData);
+                    sleepAnalyzer->update(hrData, rrData, hrvData, movementData,
+                                          sensorData.bed_status);
 
                     sleepAnalyzer->printState();
 
@@ -537,13 +538,13 @@ void bleConfigTask(void *parameter) {
         RADAR_STREAM_CHAR_UUID,
         BLECharacteristic::PROPERTY_NOTIFY
     );
-    radarStreamCharacteristic->addDescriptor(new BLE2902());
+    radarStreamCharacteristic->addDescriptor(new BLE2902());//添加通知描述符，用于客户端订阅雷达数据流
 
     radarStatusCharacteristic = radarDataService->createCharacteristic(
         RADAR_STATUS_CHAR_UUID,
         BLECharacteristic::PROPERTY_NOTIFY  // a2 仅支持 NOTIFY
     );
-    radarStatusCharacteristic->addDescriptor(new BLE2902());
+    radarStatusCharacteristic->addDescriptor(new BLE2902());//添加通知描述符，用于客户端订阅雷达状态更新
 
     // Device Config Service
     deviceCommandCharacteristic = deviceConfigService->createCharacteristic(

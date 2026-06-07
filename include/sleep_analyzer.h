@@ -125,7 +125,12 @@ private:
 
     float lastRRValue;
 
-    static const int DEEP_SLEEP_CONFIRM_SECONDS = 60;
+    // HR 觉醒检测（从 Python 移植：追踪睡眠期 HR 基线，检测持续升高）
+    float sleepHRBaseline;
+    int sleepHRBaselineCount;
+    int hrAwakeTimer;
+
+    static const int DEEP_SLEEP_CONFIRM_SECONDS = 180;
     static const int LIGHT_SLEEP_CONFIRM_SECONDS = 30;
     static const int AWAKE_CONFIRM_SECONDS = 15;
     static const int AWAKE_SLOW_CONFIRM_SECONDS = 30;
@@ -133,15 +138,22 @@ private:
     static const int OUT_OF_BED_SECONDS = 30;
     static const int SLEEPINESS_MIN_SECONDS = 300;
     static const int SLEEPINESS_MAX_SECONDS = 600;
-    static const int MOVEMENT_HIGH_THRESHOLD = 50;
+    static const int MOVEMENT_HIGH_THRESHOLD = 25;
     static const int DEEP_SLEEP_MOVEMENT_THRESHOLD = 10;
-    static const int DEEP_SLEEP_HARD_MOVEMENT_LIMIT = 15;
-    static const int FAST_AWAKE_MOVEMENT_THRESHOLD = 60;
+    static const int DEEP_SLEEP_HARD_MOVEMENT_LIMIT = 25;
+    static const int FAST_AWAKE_MOVEMENT_THRESHOLD = 45;
     static const int SLEEPINESS_MOVEMENT_THRESHOLD = 10;
-    static const int DEEP_STABLE_MIN_SECONDS = 300;
+    static const int DEEP_STABLE_MIN_SECONDS = 60;   // 深睡稳定确认时间
     static const int REM_CONFIRM_SECONDS = 60;
     static const int GETTING_UP_MIN_SECONDS = 300;
     static const int GETTING_UP_MOVEMENT_THRESHOLD = 30;
+    static const int MIN_AWAKE_COUNT_SEC = 120;
+    static const int LIGHT_SLEEP_STABILITY_MIN_SECONDS = 1200;  // 进入深睡前需浅睡稳定
+    // 双时间尺度体动 EMA（非对称状态机核心）
+    static const float EMA_SLEEP_ALPHA;           // 慢速 ~5分钟，用于入睡判断
+    static const float EMA_AWAKE_ALPHA;           // 快速 ~3秒，用于觉醒检测
+    static const int SLEEP_EMA_MOVEMENT_MAX = 8;  // 入睡条件：慢速体动 EMA 低于此值
+    static const int AWAKE_EMA_MOVEMENT_MIN = 25; // 觉醒条件：快速体动 EMA 高于此值
     static const float SLEEPINESS_THRESHOLD;
     static const float BASELINE_MOVEMENT_THRESHOLD;
     static const float BASELINE_HR_STABILITY_THRESHOLD;
@@ -152,6 +164,10 @@ private:
     float currentLightScore;
     float currentAwakeScore;
     float currentRemScore;
+
+    // 双时间尺度体动 EMA（非对称状态机核心）
+    float moveSleepEMA;  // 慢速 ~5分钟，用于入睡判断
+    float moveAwakeEMA;  // 快速 ~3秒，用于觉醒检测
 
     bool wasAsleep;
 
@@ -184,7 +200,8 @@ private:
                      const HeartRateData& hrData,
                      const RespirationData& rrData,
                      const HRVEstimate& hrvData,
-                     const BodyMovementData& movementData);
+                     const BodyMovementData& movementData,
+                     bool bedStatus);
     void updateStatistics(unsigned long dt);
     void updateSleepCycle();
     void calculateSleepScore();
@@ -199,6 +216,7 @@ private:
 
     bool tryTransitionTo(SleepState target, unsigned long confirmMs);
     bool isBestScore(float score, float s2, float s3, float s4, float margin);
+    bool checkHRAwakening(float hr, bool hrValid);  // HR 持续升高 → 觉醒检测
 
 public:
     SleepAnalyzer();
@@ -207,7 +225,8 @@ public:
     void update(const HeartRateData& hrData,
                 const RespirationData& rrData,
                 const HRVEstimate& hrvData,
-                const BodyMovementData& movementData);
+                const BodyMovementData& movementData,
+                bool bedStatus);
 
     SleepState getCurrentState() const { return currentState; }
     SleepStatistics getStatistics() const { return stats; }

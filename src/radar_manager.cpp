@@ -184,9 +184,14 @@ void BLEFlowController::reset() {
 void MyServerCallbacks::onConnect(BLEServer* pServer) {
     deviceConnected = true;
     Serial.println("✅ [BLE] 客户端已连接");
-    syncAllDeviceStatusToBLE();
+    syncAllDeviceStatusToBLE();// 连接后同步所有设备状态到BLE客户端，确保客户端状态与设备当前状态一致
 }
-
+/**
+ * @brief BLE服务器连接回调（包含参数）
+ * 当客户端连接时触发，包含连接参数
+ * @param pServer BLE服务器指针
+ * @param param 连接事件参数，包含连接ID、MTU等信息
+ */
 void MyServerCallbacks::onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) {
 #if BLE_FIXED_20_BYTE_MODE
     g_blePayloadSize = FALLBACK_PAYLOAD;// 固定兼容模式，忽略MTU协商结果

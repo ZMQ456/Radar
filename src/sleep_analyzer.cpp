@@ -1,16 +1,18 @@
 #include "sleep_analyzer.h"
 
-const float SleepAnalyzer::SLEEPINESS_THRESHOLD = 0.6f;
+const float SleepAnalyzer::SLEEPINESS_THRESHOLD = 0.45f;
 const float SleepAnalyzer::BASELINE_MOVEMENT_THRESHOLD = 0.2f;
 const float SleepAnalyzer::BASELINE_HR_STABILITY_THRESHOLD = 5.0f;
 const float SleepAnalyzer::BASELINE_RR_STABILITY_THRESHOLD = 2.0f;
 const float SleepAnalyzer::EMA_ALPHA = 0.2f;
 const float SleepAnalyzer::CONFIDENCE_MARGIN = 0.1f;
 const float SleepAnalyzer::BASELINE_BETA = 0.01f;
-const float SleepAnalyzer::HYSTERESIS_ENTER_DEEP = 0.7f;
-const float SleepAnalyzer::HYSTERESIS_EXIT_DEEP = 0.5f;
-const float SleepAnalyzer::HYSTERESIS_ENTER_REM = 0.6f;
-const float SleepAnalyzer::HYSTERESIS_EXIT_REM = 0.4f;
+const float SleepAnalyzer::HYSTERESIS_ENTER_DEEP = 0.4f;   
+const float SleepAnalyzer::HYSTERESIS_EXIT_DEEP = 0.30f;   
+const float SleepAnalyzer::HYSTERESIS_ENTER_REM = 0.45f;   
+const float SleepAnalyzer::HYSTERESIS_EXIT_REM = 0.3f;     
+const float SleepAnalyzer::EMA_SLEEP_ALPHA = 0.01f;        // 慢速 ~5分钟，用于入睡判断
+const float SleepAnalyzer::EMA_AWAKE_ALPHA = 0.3f;         // 快速 ~3秒，用于觉醒检测
 
 SleepAnalyzer::SleepAnalyzer() {
     reset();
@@ -57,8 +59,17 @@ void SleepAnalyzer::reset() {
     currentAwakeScore = 0;
     currentRemScore = 0;
 
+    // 双时间尺度体动 EMA（非对称状态机核心）
+    moveSleepEMA = 0;
+    moveAwakeEMA = 0;
+
     lastRRValue = 0;
     wasAsleep = false;
+
+    // HR 觉醒检测
+    sleepHRBaseline = 0;
+    sleepHRBaselineCount = 0;
+    hrAwakeTimer = 0;
 }
 
 PresenceData SleepAnalyzer::evaluatePresence() {
@@ -123,7 +134,8 @@ float SleepAnalyzer::normalizeHRV(float hrv) {
 }
 
 float SleepAnalyzer::normalizeMovement(float movement) {
-    return constrain_value(movement / 100.0f, 0.0f, 1.0f);
+    // 非线性归一化：开平方映射，放大小动作(3~30)，压缩大动作(60+)
+    return constrain_value(powf(movement / 100.0f, 0.5f), 0.0f, 1.0f);
 }
 
 void SleepAnalyzer::calibrateBaseline(const HeartRateData& hrData,
@@ -196,16 +208,19 @@ float SleepAnalyzer::calculateSleepinessScore(const HeartRateData& hrData,
         hrvNorm = normalizeHRV(hrvData.rmssd);
     }
     if (rrData.isValid) {
-        rrStable = 1.0f - constrain_value(rrData.variability / 5.0f, 0.0f, 1.0f);
+        // 用呼吸率偏离基线的程度代替 variability
+        float rrDev = fabs(rrData.rateSmoothed - baselineRR) / 5.0f;
+        rrStable = 1.0f - constrain_value(rrDev, 0.0f, 1.0f);
     }
     if (movementData.isValid) {
-        moveNorm = normalizeMovement(movementData.movement);
+        // 慢速 EMA：反映长期体动均值（~5分钟），只有长期静止才判高困倦
+        moveNorm = normalizeMovement(moveSleepEMA);
     }
 
     float x = 3.0f * (hrSleepFactor - 0.5f)
             + 2.5f * (hrvNorm - 0.5f)
             + 2.0f * (rrStable - 0.5f)
-            + 2.5f * (0.5f - moveNorm);
+            + 3.0f * (0.5f - moveNorm);       // 慢速体动权重提升
 
     return sigmoid(x);
 }
@@ -214,11 +229,12 @@ float SleepAnalyzer::calculateDeepSleepScore(const HeartRateData& hrData,
                                               const RespirationData& rrData,
                                               const HRVEstimate& hrvData,
                                               const BodyMovementData& movementData) {
+    // 深睡评分：相对稳定性判定。不再要求极低体动/极低HR，而看稳定性
     if (movementData.isValid && movementData.movement > DEEP_SLEEP_HARD_MOVEMENT_LIMIT) {
         return 0.0f;
     }
 
-    float hrSleepFactor = 0.5f, hrvNorm = 0, moveNorm = 0;
+    float hrSleepFactor = 0.5f, hrvNorm = 0.5f, moveNorm = 0;
 
     if (hrData.isValid) {
         float hrNorm = normalizeHR(hrData.bpmSmoothed);
@@ -228,12 +244,14 @@ float SleepAnalyzer::calculateDeepSleepScore(const HeartRateData& hrData,
         hrvNorm = normalizeHRV(hrvData.rmssd);
     }
     if (movementData.isValid) {
-        moveNorm = normalizeMovement(movementData.movement);
+        // 慢速 EMA：深睡要求长期低体动，短暂活动不误伤
+        moveNorm = normalizeMovement(moveSleepEMA);
     }
 
-    float x = 4.0f * (hrSleepFactor - 0.5f)
-            + 3.0f * (hrvNorm - 0.5f)
-            + 2.0f * (0.5f - moveNorm);
+    // 权重分配：HR稳定性为主(5.0)，体动为辅(3.0)，HRV权重降(1.5)
+    float x = 5.0f * (hrSleepFactor - 0.5f)
+            + 1.5f * (0.5f - hrvNorm)
+            + 3.0f * (0.5f - moveNorm);
 
     return sigmoid(x);
 }
@@ -260,7 +278,9 @@ float SleepAnalyzer::calculateLightSleepScore(const HeartRateData& hrData,
         }
     }
     if (rrData.isValid) {
-        rrStable = rrData.regularity;
+        // 用呼吸率偏离基线的程度
+        float rrDev = fabs(rrData.rateSmoothed - baselineRR) / 5.0f;
+        rrStable = 1.0f - constrain_value(rrDev, 0.0f, 1.0f);
     }
 
     float light = 0.3f * hrMid
@@ -278,19 +298,22 @@ float SleepAnalyzer::calculateAwakeScore(const HeartRateData& hrData,
     float moveNorm = 0, hrAwakeFactor = 0.5f, rrVar = 0;
 
     if (movementData.isValid) {
-        moveNorm = normalizeMovement(movementData.movement);
+        // 快速 EMA：响应瞬时体动突峰（几秒级别），用于觉醒检测
+        moveNorm = normalizeMovement(moveAwakeEMA);
     }
     if (hrData.isValid) {
         float hrNorm = normalizeHR(hrData.bpmSmoothed);
         hrAwakeFactor = (hrNorm + 1.0f) * 0.5f;
     }
     if (rrData.isValid) {
-        rrVar = constrain_value(rrData.variability / 5.0f, 0.0f, 1.0f);
+        // 用呼吸率偏离基线
+        float rrDev = fabs(rrData.rateSmoothed - baselineRR) / 5.0f;
+        rrVar = constrain_value(rrDev, 0.0f, 1.0f);
     }
 
-    float x = 3.0f * (moveNorm - 0.3f)
-            + 2.0f * (hrAwakeFactor - 0.5f)
-            + 1.5f * (rrVar - 0.3f);
+    float x = 5.0f * (moveNorm - 0.20f)       // 快速体动为主（降低偏置，更激进）
+            + 1.5f * (hrAwakeFactor - 0.5f)
+            + 1.0f * (rrVar - 0.3f);
 
     return sigmoid(x);
 }
@@ -299,40 +322,72 @@ float SleepAnalyzer::calculateRemScore(const HeartRateData& hrData,
                                         const RespirationData& rrData,
                                         const HRVEstimate& hrvData,
                                         const BodyMovementData& movementData) {
-    float hrHigh = 0, hrvLow = 0, rrUnstable = 0, moveLow = 0, rrChange = 0;
+
+    float hrIrregular = 0, hrvHigh = 0, moveLow = 0, rrIrregular = 0;
 
     if (hrData.isValid) {
         float hrNorm = normalizeHR(hrData.bpmSmoothed);
-        hrHigh = constrain_value(hrNorm, 0.0f, 1.0f);
+        float hrSleepFactor = (1.0f - hrNorm) * 0.5f;
+        hrIrregular = fabs(hrSleepFactor - 0.5f) * 2.0f;
     }
     if (hrvData.isValid) {
-        float hrvNorm = normalizeHRV(hrvData.rmssd);
-        hrvLow = 1.0f - hrvNorm;
-    }
-    if (rrData.isValid) {
-        rrUnstable = constrain_value(rrData.variability / 5.0f, 0.0f, 1.0f);
-        if (lastRRValue > 0) {
-            float rrDiff = fabs(rrData.rateSmoothed - lastRRValue);
-            rrChange = constrain_value(rrDiff / 3.0f, 0.0f, 1.0f);
-        }
-        lastRRValue = rrData.rateSmoothed;
+        hrvHigh = normalizeHRV(hrvData.rmssd);
     }
     if (movementData.isValid) {
-        float moveNorm = normalizeMovement(movementData.movement);
-        moveLow = 1.0f - moveNorm;
+        moveLow = 1.0f - normalizeMovement(movementData.movement);
+    }
+    if (rrData.isValid) {
+        // 用呼吸率偏离基线
+        float rrDev = fabs(rrData.rateSmoothed - baselineRR) / 3.0f;
+        rrIrregular = constrain_value(rrDev, 0.0f, 1.0f);
     }
 
-    if (movementData.isValid && movementData.movement > DEEP_SLEEP_HARD_MOVEMENT_LIMIT) {
-        return 0.0f;
+    float rem = 0.25f * hrIrregular
+              + 0.25f * hrvHigh
+              + 0.25f * moveLow
+              + 0.25f * rrIrregular;
+
+    return constrain_value(rem, 0.0f, 1.0f);
+}
+
+bool SleepAnalyzer::checkHRAwakening(float hr, bool hrValid) {
+    // 追踪睡眠期的 HR 基线，检测 HR 相对于基线持续升高作为觉醒信号
+    static const int HR_AWAKE_LOOKBACK = 60;      // 回溯窗口（秒）
+    static const float HR_ELEVATED_RATIO = 1.10f;  // HR 超过基线 10%
+    static const int HR_ELEVATED_MIN_SEC = 5;       // 升高至少持续 5 秒
+
+    if (!hrValid || hr <= 0) return false;
+
+    // 仅在睡眠相关状态中追踪基线
+    bool inSleepState = (currentState == SLEEP_LIGHT_SLEEP ||
+                         currentState == SLEEP_DEEP_SLEEP ||
+                         currentState == SLEEP_REM_SLEEP);
+
+    if (inSleepState) {
+        // EMA 跟踪睡眠期 HR 基线
+        if (sleepHRBaselineCount == 0) {
+            sleepHRBaseline = hr;
+        } else {
+            sleepHRBaseline = sleepHRBaseline * 0.95f + hr * 0.05f;
+        }
+        sleepHRBaselineCount++;
+        if (sleepHRBaselineCount > HR_AWAKE_LOOKBACK) {
+            sleepHRBaselineCount = HR_AWAKE_LOOKBACK;
+        }
     }
 
-    float x = 2.5f * (hrHigh - 0.3f)
-            + 2.0f * (hrvLow - 0.3f)
-            + 1.5f * (rrUnstable - 0.3f)
-            + 2.0f * (rrChange - 0.3f)
-            + 2.0f * (moveLow - 0.5f);
+    if (sleepHRBaseline > 0 && hr > sleepHRBaseline * HR_ELEVATED_RATIO) {
+        hrAwakeTimer++;
+    } else {
+        hrAwakeTimer = 0;
+    }
 
-    return sigmoid(x);
+    if (hrAwakeTimer >= HR_ELEVATED_MIN_SEC) {
+        hrAwakeTimer = 0;
+        return true;
+    }
+
+    return false;
 }
 
 bool SleepAnalyzer::tryTransitionTo(SleepState target, unsigned long confirmMs) {
@@ -388,7 +443,8 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                                  const HeartRateData& hrData,
                                  const RespirationData& rrData,
                                  const HRVEstimate& hrvData,
-                                 const BodyMovementData& movementData) {
+                                 const BodyMovementData& movementData,
+                                 bool bedStatus) {
     unsigned long now = millis();
 
     if (currentState != SLEEP_NO_PERSON && currentState != SLEEP_SESSION_END &&
@@ -412,6 +468,14 @@ void SleepAnalyzer::updateState(PresenceData& presence,
             break;
 
         case SLEEP_IN_BED:
+            // bedStatus 离床优先判断
+            if (!bedStatus) {
+                currentState = SLEEP_OUT_OF_BED;
+                stateEnterTime = now;
+                pendingState = currentState;
+                noPersonTimer = 0;
+                break;
+            }
             if (!presence.isPresent) {
                 noPersonTimer += 1000;
                 bool hrExists = hrData.isValid && hrData.bpmSmoothed > 0;
@@ -435,10 +499,10 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                 noPersonTimer = 0;
                 float rawSleepiness = calculateSleepinessScore(hrData, rrData, hrvData, movementData);
                 currentSleepiness = emaSmooth(rawSleepiness, currentSleepiness, EMA_ALPHA);
-                float movement = movementData.isValid ? movementData.movement : 100;
 
+                // 入睡条件：困倦度高 + 长期体动低（慢速 EMA < 阈值）
                 if (currentSleepiness > SLEEPINESS_THRESHOLD &&
-                    movement < SLEEPINESS_MOVEMENT_THRESHOLD) {
+                    moveSleepEMA < SLEEP_EMA_MOVEMENT_MAX) {
                     sleepinessDuration += 1000;
                     if (sleepinessDuration >= SLEEPINESS_MIN_SECONDS * 1000) {
                         currentState = SLEEP_LIGHT_SLEEP;
@@ -452,7 +516,8 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                     }
                 } else {
                     sleepinessDuration = 0;
-                    if (movement >= MOVEMENT_HIGH_THRESHOLD) {
+                    // 快速体动 EMA 超过阈值 → 醒
+                    if (moveAwakeEMA > AWAKE_EMA_MOVEMENT_MIN) {
                         currentState = SLEEP_AWAKE;
                         stateEnterTime = now;
                         pendingState = currentState;
@@ -464,6 +529,14 @@ void SleepAnalyzer::updateState(PresenceData& presence,
             break;
 
         case SLEEP_AWAKE:
+            // bedStatus 离床优先判断
+            if (!bedStatus) {
+                currentState = SLEEP_OUT_OF_BED;
+                stateEnterTime = now;
+                pendingState = currentState;
+                noPersonTimer = 0;
+                break;
+            }
             if (!presence.isPresent) {
                 noPersonTimer += 1000;
                 bool hrExists = hrData.isValid && hrData.bpmSmoothed > 0;
@@ -487,9 +560,8 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                 noPersonTimer = 0;
                 float rawSleepiness = calculateSleepinessScore(hrData, rrData, hrvData, movementData);
                 currentSleepiness = emaSmooth(rawSleepiness, currentSleepiness, EMA_ALPHA);
-                float movement = movementData.isValid ? movementData.movement : 100;
 
-                if (wasAsleep && movement >= GETTING_UP_MOVEMENT_THRESHOLD) {
+                if (wasAsleep && moveAwakeEMA >= GETTING_UP_MOVEMENT_THRESHOLD) {
                     gettingUpDuration += 1000;
                     if (gettingUpDuration >= GETTING_UP_MIN_SECONDS * 1000) {
                         currentState = SLEEP_GETTING_UP;
@@ -503,8 +575,9 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                     gettingUpDuration = 0;
                 }
 
+                // 重新入睡：困倦度高 + 长期体动低（慢速 EMA）
                 if (currentSleepiness > SLEEPINESS_THRESHOLD &&
-                    movement < SLEEPINESS_MOVEMENT_THRESHOLD) {
+                    moveSleepEMA < SLEEP_EMA_MOVEMENT_MAX) {
                     sleepinessDuration += 1000;
                     if (sleepinessDuration >= SLEEPINESS_MIN_SECONDS * 1000) {
                         currentState = SLEEP_LIGHT_SLEEP;
@@ -523,6 +596,14 @@ void SleepAnalyzer::updateState(PresenceData& presence,
             break;
 
         case SLEEP_LIGHT_SLEEP:
+            // bedStatus 离床优先判断
+            if (!bedStatus) {
+                currentState = SLEEP_OUT_OF_BED;
+                stateEnterTime = now;
+                pendingState = currentState;
+                noPersonTimer = 0;
+                break;
+            }
             if (!presence.isPresent) {
                 noPersonTimer += 1000;
                 if (noPersonTimer > OUT_OF_BED_SECONDS * 1000) {
@@ -534,6 +615,19 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                 }
             } else {
                 noPersonTimer = 0;
+
+                // HR 持续升高 → 觉醒检测（优先于体动）
+                if (checkHRAwakening(hrData.bpmSmoothed, hrData.isValid)) {
+                    currentState = SLEEP_AWAKE;
+                    stateEnterTime = now;
+                    pendingState = SLEEP_AWAKE;
+                    stats.wakeCount++;
+                    awakeDuration = 0;
+                    deepSleepDuration = 0;
+                    deepStableDuration = 0;
+                    Serial.println("🔄 状态切换: 浅睡 → 清醒 (HR升高)");
+                    break;
+                }
 
                 if (movementData.isValid && movementData.movement > FAST_AWAKE_MOVEMENT_THRESHOLD) {
                     currentState = SLEEP_AWAKE;
@@ -575,10 +669,13 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                         deepStableDuration = 0;
                     }
                     awakeDuration = 0;
-                    if (deepStableDuration >= DEEP_STABLE_MIN_SECONDS * 1000 &&
+                    // 进入深睡前置条件：浅睡需先稳定 20 分钟
+                    bool lightStable = (now - stateEnterTime) >= LIGHT_SLEEP_STABILITY_MIN_SECONDS * 1000UL;
+                    if (lightStable &&
+                        deepStableDuration >= DEEP_STABLE_MIN_SECONDS * 1000 &&
                         tryTransitionTo(SLEEP_DEEP_SLEEP, DEEP_SLEEP_CONFIRM_SECONDS * 1000)) {
                         deepSleepDuration = 0;
-                        Serial.println("🔄 状态切换: 浅睡 → 深睡 (稳定≥5分钟)");
+                        Serial.println("🔄 状态切换: 浅睡 → 深睡");
                     }
                 } else if (isBestScore(currentRemScore, currentAwakeScore, currentDeepScore, currentLightScore, CONFIDENCE_MARGIN) &&
                            currentRemScore >= HYSTERESIS_ENTER_REM) {
@@ -600,6 +697,14 @@ void SleepAnalyzer::updateState(PresenceData& presence,
             break;
 
         case SLEEP_DEEP_SLEEP:
+            // bedStatus 离床优先判断
+            if (!bedStatus) {
+                currentState = SLEEP_OUT_OF_BED;
+                stateEnterTime = now;
+                pendingState = currentState;
+                noPersonTimer = 0;
+                break;
+            }
             if (!presence.isPresent) {
                 noPersonTimer += 1000;
                 if (noPersonTimer > OUT_OF_BED_SECONDS * 1000) {
@@ -611,6 +716,19 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                 }
             } else {
                 noPersonTimer = 0;
+
+                // HR 持续升高 → 觉醒检测（优先于体动）
+                if (checkHRAwakening(hrData.bpmSmoothed, hrData.isValid)) {
+                    currentState = SLEEP_AWAKE;
+                    stateEnterTime = now;
+                    pendingState = SLEEP_AWAKE;
+                    stats.wakeCount++;
+                    awakeDuration = 0;
+                    lightSleepDuration = 0;
+                    movementHighDuration = 0;
+                    Serial.println("🔄 状态切换: 深睡 → 清醒 (HR升高)");
+                    break;
+                }
 
                 if (movementData.isValid && movementData.movement > FAST_AWAKE_MOVEMENT_THRESHOLD) {
                     currentState = SLEEP_AWAKE;
@@ -664,6 +782,14 @@ void SleepAnalyzer::updateState(PresenceData& presence,
             break;
 
         case SLEEP_REM_SLEEP:
+            // bedStatus 离床优先判断
+            if (!bedStatus) {
+                currentState = SLEEP_OUT_OF_BED;
+                stateEnterTime = now;
+                pendingState = currentState;
+                noPersonTimer = 0;
+                break;
+            }
             if (!presence.isPresent) {
                 noPersonTimer += 1000;
                 if (noPersonTimer > OUT_OF_BED_SECONDS * 1000) {
@@ -675,6 +801,16 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                 }
             } else {
                 noPersonTimer = 0;
+
+                // HR 持续升高 → 觉醒检测（优先于体动）
+                if (checkHRAwakening(hrData.bpmSmoothed, hrData.isValid)) {
+                    currentState = SLEEP_AWAKE;
+                    stateEnterTime = now;
+                    pendingState = SLEEP_AWAKE;
+                    stats.wakeCount++;
+                    Serial.println("🔄 状态切换: REM → 清醒 (HR升高)");
+                    break;
+                }
 
                 if (movementData.isValid && movementData.movement > FAST_AWAKE_MOVEMENT_THRESHOLD) {
                     currentState = SLEEP_AWAKE;
@@ -713,7 +849,7 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                     if (deepStableDuration >= DEEP_STABLE_MIN_SECONDS * 1000 &&
                         tryTransitionTo(SLEEP_DEEP_SLEEP, DEEP_SLEEP_CONFIRM_SECONDS * 1000)) {
                         deepStableDuration = 0;
-                        Serial.println("🔄 状态切换: REM → 深睡 (稳定≥5分钟)");
+                        Serial.println("🔄 状态切换: REM → 深睡");
                     }
                 } else {
                     awakeDuration = 0;
@@ -920,12 +1056,18 @@ void SleepAnalyzer::calculateSleepScore() {
 void SleepAnalyzer::update(const HeartRateData& hrData,
                             const RespirationData& rrData,
                             const HRVEstimate& hrvData,
-                            const BodyMovementData& movementData) {
+                            const BodyMovementData& movementData,
+                            bool bedStatus) {
     calibrateBaseline(hrData, rrData, movementData);
+
+    // 双时间尺度体动 EMA（非对称状态机核心）
+    float rawMove = movementData.isValid ? movementData.movement : 0;
+    moveSleepEMA = emaSmooth(rawMove, moveSleepEMA, EMA_SLEEP_ALPHA);
+    moveAwakeEMA = emaSmooth(rawMove, moveAwakeEMA, EMA_AWAKE_ALPHA);
 
     PresenceData presence = evaluatePresence();
 
-    updateState(presence, hrData, rrData, hrvData, movementData);
+    updateState(presence, hrData, rrData, hrvData, movementData, bedStatus);
 
     updateSleepCycle();
 
