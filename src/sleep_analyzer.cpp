@@ -478,8 +478,7 @@ void SleepAnalyzer::updateState(PresenceData& presence,
             }
             if (!presence.isPresent) {
                 noPersonTimer += 1000;
-                bool hrExists = hrData.isValid && hrData.bpmSmoothed > 0;
-                if (noPersonTimer > NO_PERSON_END_SECONDS * 1000 && !hrExists) {
+                if (noPersonTimer > NO_PERSON_END_SECONDS * 1000) {
                     currentState = SLEEP_SESSION_END;
                     stateEnterTime = now;
                     pendingState = currentState;
@@ -487,8 +486,6 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                         calculateSleepScore();
                     }
                     Serial.println("🔄 状态切换: 在床 → 会话结束");
-                } else if (noPersonTimer > NO_PERSON_END_SECONDS * 1000 && hrExists) {
-                    Serial.println("⚠️ 检测到无人但HR存在，可能遮挡，暂不结束会话");
                 } else if (noPersonTimer > OUT_OF_BED_SECONDS * 1000) {
                     currentState = SLEEP_OUT_OF_BED;
                     stateEnterTime = now;
@@ -539,8 +536,7 @@ void SleepAnalyzer::updateState(PresenceData& presence,
             }
             if (!presence.isPresent) {
                 noPersonTimer += 1000;
-                bool hrExists = hrData.isValid && hrData.bpmSmoothed > 0;
-                if (noPersonTimer > NO_PERSON_END_SECONDS * 1000 && !hrExists) {
+                if (noPersonTimer > NO_PERSON_END_SECONDS * 1000) {
                     currentState = SLEEP_SESSION_END;
                     stateEnterTime = now;
                     pendingState = currentState;
@@ -548,8 +544,6 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                         calculateSleepScore();
                     }
                     Serial.println("🔄 状态切换: 清醒 → 会话结束");
-                } else if (noPersonTimer > NO_PERSON_END_SECONDS * 1000 && hrExists) {
-                    Serial.println("⚠️ 检测到无人但HR存在，可能遮挡，暂不结束会话");
                 } else if (noPersonTimer > OUT_OF_BED_SECONDS * 1000) {
                     currentState = SLEEP_OUT_OF_BED;
                     stateEnterTime = now;
@@ -868,8 +862,7 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                 Serial.println("🔄 状态切换: 离床 → 在床");
             } else {
                 noPersonTimer += 1000;
-                bool hrExists = hrData.isValid && hrData.bpmSmoothed > 0;
-                if (noPersonTimer > NO_PERSON_END_SECONDS * 1000 && !hrExists) {
+                if (noPersonTimer > NO_PERSON_END_SECONDS * 1000) {
                     currentState = SLEEP_SESSION_END;
                     stateEnterTime = now;
                     pendingState = currentState;
@@ -877,8 +870,6 @@ void SleepAnalyzer::updateState(PresenceData& presence,
                         calculateSleepScore();
                     }
                     Serial.println("🔄 状态切换: 离床 → 会话结束");
-                } else if (noPersonTimer > NO_PERSON_END_SECONDS * 1000 && hrExists) {
-                    Serial.println("⚠️ 检测到无人但HR存在，可能遮挡，暂不结束会话");
                 }
             }
             break;
@@ -886,8 +877,7 @@ void SleepAnalyzer::updateState(PresenceData& presence,
         case SLEEP_GETTING_UP:
             if (!presence.isPresent) {
                 noPersonTimer += 1000;
-                bool hrExists = hrData.isValid && hrData.bpmSmoothed > 0;
-                if (noPersonTimer > NO_PERSON_END_SECONDS * 1000 && !hrExists) {
+                if (noPersonTimer > NO_PERSON_END_SECONDS * 1000) {
                     currentState = SLEEP_SESSION_END;
                     stateEnterTime = now;
                     pendingState = currentState;

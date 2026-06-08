@@ -46,7 +46,7 @@ void initMQTT();//初始化MQTT
 void reconnectMQTT();//重新连接MQTT服务器
 void checkMQTTStatus();//检查MQTT连接状态
 void sendDailyDataToMQTT();//发送每日数据到MQTT
-void sendSleepDataToMQTT();//发送睡眠数据到MQTT
+bool sendSleepDataToMQTT(bool allowSessionEnd = false);//发送睡眠数据到MQTT
 void sendHeartbeatToMQTT();//发送心跳包
 
 // OTA相关函数

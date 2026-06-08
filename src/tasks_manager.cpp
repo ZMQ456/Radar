@@ -5,6 +5,7 @@
 #include "emotion_analyzer_simple.h"
 #include <BLEDevice.h>
 #include <esp_task_wdt.h>
+#include <freertos/portmacro.h>
 
 // 外部常量声明
 extern const unsigned long SENSOR_TIMEOUT; // 传感器超时时间
@@ -17,16 +18,51 @@ bool breatheIncreasing = true;//呼吸值是否递增
 uint8_t WiFi_Connect_First_bit = 1;//WiFi连接状态位
 uint64_t device_sn = 0;//设备SN，初始为0，后续从Flash中加载
 
-PhysioDataProcessor* physioProcessor;//生理数据处理器
 SimpleEmotionAnalyzer* emotionAnalyzer;//情感分析器
 
-// 情绪分析结果全局缓存（供 updateRadarStatus 和 mqtt.cpp 读取）
-EmotionResult g_lastEmotionResult = {};
-bool g_hasEmotionResult = false;
-unsigned long g_lastEmotionUpdateMs = 0;
+// 情绪分析结果缓存（供 MQTT 上报读取）
+static EmotionResult g_lastEmotionResult = {};
+static bool g_hasEmotionResult = false;
+static unsigned long g_lastEmotionUpdateMs = 0;
+static portMUX_TYPE emotionResultMux = portMUX_INITIALIZER_UNLOCKED;
+static const unsigned long EMOTION_RESULT_TTL_MS = 5000;
 
 bool clearConfigRequested = false;//是否请求清除配置
 bool forceLedOff = false;//是否强制关闭LED
+
+void updateEmotionResult(const EmotionResult& result) {
+    unsigned long now = millis();
+
+    taskENTER_CRITICAL(&emotionResultMux);
+    g_lastEmotionResult = result;
+    g_hasEmotionResult = result.isValid;
+    g_lastEmotionUpdateMs = now;
+    taskEXIT_CRITICAL(&emotionResultMux);
+}
+
+void clearEmotionResult() {
+    taskENTER_CRITICAL(&emotionResultMux);
+    g_lastEmotionResult = {};
+    g_hasEmotionResult = false;
+    g_lastEmotionUpdateMs = 0;
+    taskEXIT_CRITICAL(&emotionResultMux);
+}
+
+bool getFreshEmotionResult(EmotionResult& result) {
+    bool hasResult = false;
+    bool isValid = false;
+    unsigned long updatedAt = 0;
+    unsigned long now = millis();
+
+    taskENTER_CRITICAL(&emotionResultMux);
+    result = g_lastEmotionResult;
+    hasResult = g_hasEmotionResult;
+    isValid = g_lastEmotionResult.isValid;
+    updatedAt = g_lastEmotionUpdateMs;
+    taskEXIT_CRITICAL(&emotionResultMux);
+
+    return hasResult && isValid && (now - updatedAt <= EMOTION_RESULT_TTL_MS);
+}
 
 /**
  * @brief 加载设备SN
@@ -298,11 +334,19 @@ void bootButtonMonitorTask(void *parameter) {
  */
 void sleepAnalysisTask(void *parameter) {
     SleepAnalyzer* sleepAnalyzer = new SleepAnalyzer();
+    PhysioDataProcessor* sleepPhysioProcessor = new PhysioDataProcessor();
 
     static unsigned long lastSleepAnalysisTime = 0;
     const unsigned long SLEEP_ANALYSIS_INTERVAL = 1000;
     static unsigned long lastStatsPrintTime = 0;
     const unsigned long STATS_PRINT_INTERVAL = 30000;
+
+    // 会话结束检测：追踪"会话结束"状态
+    static bool sessionReportSent = false;
+    static bool sessionInfluxReportSent = false;
+    static bool sessionMqttReportSent = false;
+    static unsigned long lastSessionReportAttemptTime = 0;
+    const unsigned long SESSION_REPORT_RETRY_INTERVAL = 5000;
 
     while (1) {
         unsigned long currentTime = millis();
@@ -315,13 +359,13 @@ void sleepAnalysisTask(void *parameter) {
                 float rr = sensorData.breath_valid ? sensorData.breath_rate : 0;
 
                 if (hr > 0 || rr > 0) {
-                    physioProcessor->update(hr, rr,
+                    sleepPhysioProcessor->update(hr, rr,
                         sensorData.heart_valid ? 80 : 0,
                         sensorData.breath_valid ? 80 : 0);
 
-                    HeartRateData hrData = physioProcessor->getHeartRateData();
-                    RespirationData rrData = physioProcessor->getRespirationData();
-                    HRVEstimate hrvData = physioProcessor->getHRVEstimate();
+                    HeartRateData hrData = sleepPhysioProcessor->getHeartRateData();
+                    RespirationData rrData = sleepPhysioProcessor->getRespirationData();
+                    HRVEstimate hrvData = sleepPhysioProcessor->getHRVEstimate();
 
                     BodyMovementData movementData;
                     memset(&movementData, 0, sizeof(BodyMovementData));
@@ -335,6 +379,72 @@ void sleepAnalysisTask(void *parameter) {
                     sleepAnalyzer->update(hrData, rrData, hrvData, movementData,
                                           sensorData.bed_status);
 
+                    // 更新全局睡眠分析快照
+                    SleepState state = sleepAnalyzer->getCurrentState();
+                    SleepStatistics stats = sleepAnalyzer->getStatistics();
+                    SleepScore score = sleepAnalyzer->getScore();
+                    SleepCycle cycle = sleepAnalyzer->getCycle();
+                    SleepAnalysisSnapshot snapshot = {0};
+
+                    snapshot.algorithm_state = (int)state;
+                    snapshot.current_sleepiness = sleepAnalyzer->getSleepiness();
+
+                    snapshot.total_sleep_time = stats.totalSleepTime;
+                    snapshot.deep_sleep_time = stats.deepSleepTime;
+                    snapshot.light_sleep_time = stats.lightSleepTime;
+                    snapshot.rem_sleep_time = stats.remSleepTime;
+                    snapshot.awake_time = stats.awakeTime;
+                    snapshot.out_of_bed_time = stats.outOfBedTime;
+                    snapshot.sleep_latency = stats.sleepLatency;
+                    snapshot.wake_count = stats.wakeCount;
+                    snapshot.sleep_cycles = stats.sleepCycles;
+                    snapshot.session_start_time = stats.sessionStartTime;
+                    snapshot.sleep_start_time = stats.sleepStartTime;
+                    snapshot.last_wake_time = stats.lastWakeTime;
+
+                    snapshot.duration_score = score.durationScore;
+                    snapshot.deep_score = score.deepScore;
+                    snapshot.continuity_score = score.continuityScore;
+                    snapshot.physiology_score = score.physiologyScore;
+                    snapshot.latency_score = score.latencyScore;
+                    snapshot.efficiency_score = score.efficiencyScore;
+                    snapshot.cycle_score = score.cycleScore;
+                    snapshot.total_score = score.totalScore;
+
+                    snapshot.cycle_count = cycle.cycleCount;
+                    snapshot.cycle_start_time = cycle.cycleStartTime;
+                    snapshot.in_deep_phase = cycle.inDeepPhase;
+                    snapshot.in_rem_phase = cycle.inRemPhase;
+
+                    snapshot.updated_at = currentTime;
+                    snapshot.valid = true;
+                    updateSleepAnalysisSnapshot(snapshot);
+
+                    // 会话结束检测：监听 SLEEP_SESSION_END 状态，立即发送睡眠报告
+                    if (state == SLEEP_SESSION_END) {
+                        // Session-end reports are retried until both storage paths succeed.
+                        if (!sessionReportSent &&
+                            currentTime - lastSessionReportAttemptTime >= SESSION_REPORT_RETRY_INTERVAL) {
+                            lastSessionReportAttemptTime = currentTime;
+                            Serial.println("[SleepAnalyzer] 会话结束，生成睡眠报告");
+                            if (!sessionInfluxReportSent) {
+                                sessionInfluxReportSent = sendSleepDataToInfluxDB(true);
+                            }
+                            if (!sessionMqttReportSent) {
+                                sessionMqttReportSent = sendSleepDataToMQTT(true);
+                            }
+                            sessionReportSent = sessionInfluxReportSent && sessionMqttReportSent;
+                            if (!sessionReportSent) {
+                                Serial.println("[SleepAnalyzer] 睡眠报告发送失败，等待重试");
+                            }
+                        }
+                    } else {
+                        sessionReportSent = false;
+                        sessionInfluxReportSent = false;
+                        sessionMqttReportSent = false;
+                        lastSessionReportAttemptTime = 0;
+                    }
+
                     sleepAnalyzer->printState();
 
                     if (currentTime - lastStatsPrintTime >= STATS_PRINT_INTERVAL) {
@@ -344,6 +454,8 @@ void sleepAnalysisTask(void *parameter) {
                 }
             }
         }
+
+        invalidateSleepAnalysisSnapshotIfStale();
 
         vTaskDelay(50 / portTICK_PERIOD_MS);
         esp_task_wdt_reset();
@@ -576,7 +688,7 @@ void bleConfigTask(void *parameter) {
     Serial.println(String("✅ BLE已启动，设备名称: ") + snName);
 
     static unsigned long lastRadarStatusUpdate = 0;
-    const unsigned long RADAR_STATUS_UPDATE_INTERVAL = 1000; // 每1秒更新一次雷达状态
+    const unsigned long RADAR_STATUS_UPDATE_INTERVAL = 200; // 每200毫秒更新一次雷达状态
 
     while(1) {
         processBLEConfig();//处理BLE配置命令
@@ -678,7 +790,7 @@ void radarCmdTask(void *parameter) {
  * @param parameter 任务参数（未使用）
  */
 void emotionAnalysisTask(void *parameter) {
-    // physioProcessor 已在 initAllTasks() 中初始化，这里只创建情绪分析器
+    PhysioDataProcessor* emotionPhysioProcessor = new PhysioDataProcessor();
     emotionAnalyzer = new SimpleEmotionAnalyzer(60);
 
     static unsigned long lastEmotionAnalysisTime = 0;
@@ -695,13 +807,13 @@ void emotionAnalysisTask(void *parameter) {
                 float rr = sensorData.breath_valid ? sensorData.breath_rate : 0;
 
                 if (hr > 0 || rr > 0) {
-                    physioProcessor->update(hr, rr,
+                    emotionPhysioProcessor->update(hr, rr,
                         sensorData.heart_valid ? 80 : 0,
                         sensorData.breath_valid ? 80 : 0);
 
-                    HeartRateData hrData = physioProcessor->getHeartRateData();
-                    RespirationData rrData = physioProcessor->getRespirationData();
-                    HRVEstimate hrvData = physioProcessor->getHRVEstimate();
+                    HeartRateData hrData = emotionPhysioProcessor->getHeartRateData();
+                    RespirationData rrData = emotionPhysioProcessor->getRespirationData();
+                    HRVEstimate hrvData = emotionPhysioProcessor->getHRVEstimate();
 
                     BodyMovementData movementData;
                     memset(&movementData, 0, sizeof(BodyMovementData));
@@ -720,9 +832,7 @@ void emotionAnalysisTask(void *parameter) {
 
                     if (emotionResult.isValid) {
                         // 更新全局缓存
-                        g_lastEmotionResult = emotionResult;
-                        g_hasEmotionResult = true;
-                        g_lastEmotionUpdateMs = millis();
+                        updateEmotionResult(emotionResult);
 
                         Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
                         Serial.printf("主要情绪:%s (置信度: %.1f%%);",
@@ -740,15 +850,15 @@ void emotionAnalysisTask(void *parameter) {
                         Serial.printf("副交感神经活动:%.2f\n", emotionResult.parasympatheticActivity);
                     } else {
                         // 分析结果无效，清除缓存
-                        g_hasEmotionResult = false;
+                        clearEmotionResult();
                     }
                 } else {
                     // hr 和 rr 都为 0，清除缓存
-                    g_hasEmotionResult = false;
+                    clearEmotionResult();
                 }
             } else {
                 // 传感器数据无效，清除缓存
-                g_hasEmotionResult = false;
+                clearEmotionResult();
             }
         }
 
@@ -763,9 +873,6 @@ void emotionAnalysisTask(void *parameter) {
  */
 void initAllTasks() {
     loadDeviceSN();//加载设备序列号
-
-    // 提前初始化共享的生理数据处理器，避免 sleepAnalysisTask 和 emotionAnalysisTask 之间的初始化竞争
-    physioProcessor = new PhysioDataProcessor();
 
     xTaskCreate(bootButtonMonitorTask, "Boot Button Monitor Task", 2048, NULL, 1, NULL);//创建BOOT按钮监控任务
     xTaskCreate(ledControlTask, "LED Control Task", 2048, NULL, 1, NULL);//创建LED控制任务

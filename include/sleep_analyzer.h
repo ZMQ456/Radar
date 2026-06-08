@@ -16,7 +16,7 @@ enum SleepState {
     SLEEP_REM_SLEEP,
     SLEEP_OUT_OF_BED,
     SLEEP_GETTING_UP,
-    SLEEP_SESSION_END
+    SLEEP_SESSION_END // 睡眠会话结束（无人且睡眠结束，等待下一次入睡）
 };
 
 static const char* SLEEP_STATE_NAMES[] = {

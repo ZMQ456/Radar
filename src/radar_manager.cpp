@@ -3,6 +3,7 @@
 #include "wifi_manager.h"
 #include <Preferences.h>
 #include <esp_task_wdt.h>
+#include <freertos/portmacro.h>
 #include <string.h>
 #include <vector>
 
@@ -45,7 +46,42 @@ static uint8_t currentMqttStatus = 0;          // MQTT 状态
 static uint8_t currentRadarSleepStatus = 0;    // 雷达睡眠查询状态
 
 SensorData sensorData; // 传感器数据结构体
+static SleepAnalysisSnapshot sleepAnalysisSnapshot = {0}; // 睡眠分析快照（全局缓存）
+static portMUX_TYPE sleepAnalysisSnapshotMux = portMUX_INITIALIZER_UNLOCKED;
 HardwareSerial mySerial1(1); // 硬件串口1对象
+
+void updateSleepAnalysisSnapshot(const SleepAnalysisSnapshot& snapshot) {
+    taskENTER_CRITICAL(&sleepAnalysisSnapshotMux);
+    sleepAnalysisSnapshot = snapshot;
+    taskEXIT_CRITICAL(&sleepAnalysisSnapshotMux);
+}
+
+bool getFreshSleepAnalysisSnapshot(SleepAnalysisSnapshot& snapshot) {
+    unsigned long now = millis();
+
+    taskENTER_CRITICAL(&sleepAnalysisSnapshotMux);
+    snapshot = sleepAnalysisSnapshot;
+    taskEXIT_CRITICAL(&sleepAnalysisSnapshotMux);
+
+    return snapshot.valid &&
+           (now - snapshot.updated_at <= SLEEP_ANALYSIS_SNAPSHOT_TTL_MS);
+}
+
+bool isSleepAnalysisSnapshotFresh() {
+    SleepAnalysisSnapshot snapshot = {0};
+    return getFreshSleepAnalysisSnapshot(snapshot);
+}
+
+void invalidateSleepAnalysisSnapshotIfStale() {
+    unsigned long now = millis();
+
+    taskENTER_CRITICAL(&sleepAnalysisSnapshotMux);
+    if (sleepAnalysisSnapshot.valid &&
+        now - sleepAnalysisSnapshot.updated_at > SLEEP_ANALYSIS_SNAPSHOT_TTL_MS) {
+        sleepAnalysisSnapshot.valid = false;
+    }
+    taskEXIT_CRITICAL(&sleepAnalysisSnapshotMux);
+}
 
 QueueHandle_t phaseDataQueue; // 相位数据队列句柄
 QueueHandle_t vitalDataQueue; // 生命体征数据队列句柄
@@ -945,16 +981,12 @@ static bool sendVitalDailyDataToInfluxDB(const VitalData& data) {
         appendInfluxField(dailyDataLine, firstField, "humanDistance=" + String(data.distance) + "i");
     }
 
-    appendInfluxField(dailyDataLine, firstField, "sleepState=" + String(data.sleep_state) + "i");
     appendInfluxField(dailyDataLine, firstField, "humanPositionX=" + String(data.pos_x) + "i");
     appendInfluxField(dailyDataLine, firstField, "humanPositionY=" + String(data.pos_y) + "i");
     appendInfluxField(dailyDataLine, firstField, "humanPositionZ=" + String(data.pos_z) + "i");
     appendInfluxField(dailyDataLine, firstField, "heartbeatWaveform=" + String((int)data.heartbeat_waveform) + "i");
     appendInfluxField(dailyDataLine, firstField, "breathingWaveform=" + String((int)data.breathing_waveform) + "i");
-    appendInfluxField(dailyDataLine, firstField, "abnormalState=" + String(data.abnormal_state) + "i");
     appendInfluxField(dailyDataLine, firstField, "bedStatus=" + String(data.bed_status) + "i");
-    appendInfluxField(dailyDataLine, firstField, "struggleAlert=" + String(data.struggle_alert) + "i");
-    appendInfluxField(dailyDataLine, firstField, "noOneAlert=" + String(data.no_one_alert) + "i");
 
     return !firstField && sendDailyDataToInfluxDB(dailyDataLine);
 }
@@ -1227,15 +1259,26 @@ bool sendDailyDataToInfluxDB(String dailyDataLine) {
  * @brief 发送睡眠数据到InfluxDB数据库
  * 将睡眠相关的统计数据发送到InfluxDB时序数据库
  */
-void sendSleepDataToInfluxDB() {
+bool sendSleepDataToInfluxDB(bool allowSessionEnd) {
     if (WiFi.status() != WL_CONNECTED) {
-        return;
+        return false;
     }
-    
-    if (sensorData.sleep_total_time == 0) {
-        return;
+
+    SleepAnalysisSnapshot sleepSnapshot = {0};
+    bool useAlgorithmSleepData = getFreshSleepAnalysisSnapshot(sleepSnapshot);// 获取最新的睡眠分析快照，判断是否使用算法睡眠数据
+
+    if (useAlgorithmSleepData
+            ? !(sleepSnapshot.algorithm_state == 3 ||
+                sleepSnapshot.algorithm_state == 4 ||
+                sleepSnapshot.algorithm_state == 5 ||
+                (allowSessionEnd && sleepSnapshot.algorithm_state == 8))
+            : (sensorData.sleep_state != 0 && sensorData.sleep_state != 1)) {
+        Serial.printf("[InfluxDB] 当前不是睡眠状态，跳过sleep_data写入，state=%d (source=%s)\n",
+                      useAlgorithmSleepData ? sleepSnapshot.algorithm_state : (int)sensorData.sleep_state,
+                      useAlgorithmSleepData ? "algorithm" : "radar");
+        return false;
     }
-    
+
     HTTPClient http;
     http.setTimeout(5000);  // 增加超时到5秒
     http.setConnectTimeout(5000);  // 连接超时5秒
@@ -1245,35 +1288,64 @@ void sendSleepDataToInfluxDB() {
     http.begin(url);
     http.addHeader("Authorization", String("Token ") + String(influxDBToken));
     http.addHeader("Content-Type", "text/plain; charset=utf-8");
-    
+
     String macAddress = getDeviceMacAddress();
-    String lineProtocol = String("sleep_data,deviceId=") + macAddress + ",dataType=sleep ";
-    
-    String fields = "";
-    fields += String("sleepQualityScore=") + String((int)sensorData.sleep_score) + "i";
-    fields += ",sleepQualityGrade=" + String((int)sensorData.sleep_grade) + "i";
-    fields += ",totalSleepDuration=" + String((int)sensorData.sleep_total_time) + "i";
-    fields += ",awakeDurationRatio=" + String((int)sensorData.awake_ratio) + "i";
-    fields += ",lightSleepRatio=" + String((int)sensorData.light_sleep_ratio) + "i";
-    fields += ",deepSleepRatio=" + String((int)sensorData.deep_sleep_ratio) + "i";
-    fields += ",outOfBedDuration=" + String((int)sensorData.bed_Out_Time) + "i";
-    fields += ",outOfBedCount=" + String((int)sensorData.turn_count) + "i";
-    fields += ",turnCount=" + String((int)sensorData.turnover_count) + "i";
-    fields += ",avgBreathingRate=" + String((int)sensorData.avg_breath_rate) + "i";
-    fields += ",avgHeartRate=" + String((int)sensorData.avg_heart_rate) + "i";
-    fields += ",apneaCount=" + String((int)sensorData.apnea_count) + "i";
-    fields += ",abnormalState=" + String((int)sensorData.abnormal_state) + "i";
-    fields += ",breathStatus=" + String((int)sensorData.breath_status) + "i";
-    fields += ",sleepState=" + String((int)sensorData.sleep_state) + "i";
-    fields += ",largeMoveRatio=" + String((int)sensorData.large_move_ratio) + "i";
-    fields += ",smallMoveRatio=" + String((int)sensorData.small_move_ratio) + "i";
-    fields += ",struggleAlert=" + String((int)sensorData.struggle_alert) + "i";
-    fields += ",noOneAlert=" + String((int)sensorData.no_one_alert) + "i";
-    fields += ",awakeDuration=" + String((int)sensorData.awake_time) + "i";
-    fields += ",lightSleepDuration=" + String((int)sensorData.light_sleep_time) + "i";
-    fields += ",deepSleepDuration=" + String((int)sensorData.deep_sleep_time) + "i";
-    
-    lineProtocol += fields;
+    String lineProtocol = String("sleep_data,deviceId=") + macAddress +
+                          ",dataType=sleep,source=" +
+                          (useAlgorithmSleepData ? "algorithm " : "radar ");
+    bool firstField = true;
+
+    if (useAlgorithmSleepData) {
+        appendInfluxField(lineProtocol, firstField, "sleepQualityScore=" + String((int)(sleepSnapshot.total_score + 0.5f)) + "i");
+        appendInfluxField(lineProtocol, firstField, "sleepQualityGrade=" + String((int)sensorData.sleep_grade) + "i");
+        appendInfluxField(lineProtocol, firstField, "sleepState=" + String(sleepSnapshot.algorithm_state) + "i");
+        appendInfluxField(lineProtocol, firstField, "totalSleepDuration=" + String(sleepSnapshot.total_sleep_time) + "i");
+        appendInfluxField(lineProtocol, firstField, "awakeDuration=" + String(sleepSnapshot.awake_time) + "i");
+        appendInfluxField(lineProtocol, firstField, "lightSleepDuration=" + String(sleepSnapshot.light_sleep_time) + "i");
+        appendInfluxField(lineProtocol, firstField, "deepSleepDuration=" + String(sleepSnapshot.deep_sleep_time) + "i");
+        appendInfluxField(lineProtocol, firstField, "remSleepDuration=" + String(sleepSnapshot.rem_sleep_time) + "i");
+        appendInfluxField(lineProtocol, firstField, "outOfBedDuration=" + String(sleepSnapshot.out_of_bed_time) + "i");
+        appendInfluxField(lineProtocol, firstField, "sleepLatency=" + String(sleepSnapshot.sleep_latency) + "i");
+        appendInfluxField(lineProtocol, firstField, "wakeCount=" + String(sleepSnapshot.wake_count) + "i");
+        appendInfluxField(lineProtocol, firstField, "sleepCycles=" + String(sleepSnapshot.sleep_cycles) + "i");
+        appendInfluxField(lineProtocol, firstField, "sleepiness=" + String(sleepSnapshot.current_sleepiness));
+        appendInfluxField(lineProtocol, firstField, "durationScore=" + String(sleepSnapshot.duration_score));
+        appendInfluxField(lineProtocol, firstField, "deepScore=" + String(sleepSnapshot.deep_score));
+        appendInfluxField(lineProtocol, firstField, "continuityScore=" + String(sleepSnapshot.continuity_score));
+        appendInfluxField(lineProtocol, firstField, "physiologyScore=" + String(sleepSnapshot.physiology_score));
+        appendInfluxField(lineProtocol, firstField, "latencyScore=" + String(sleepSnapshot.latency_score));
+        appendInfluxField(lineProtocol, firstField, "efficiencyScore=" + String(sleepSnapshot.efficiency_score));
+        appendInfluxField(lineProtocol, firstField, "cycleScore=" + String(sleepSnapshot.cycle_score));
+        appendInfluxField(lineProtocol, firstField, "inDeepPhase=" + String(sleepSnapshot.in_deep_phase ? 1 : 0) + "i");
+        appendInfluxField(lineProtocol, firstField, "inRemPhase=" + String(sleepSnapshot.in_rem_phase ? 1 : 0) + "i");
+        appendInfluxField(lineProtocol, firstField, "awakeDurationRatio=" + String((int)sensorData.awake_ratio) + "i");
+        appendInfluxField(lineProtocol, firstField, "lightSleepRatio=" + String((int)sensorData.light_sleep_ratio) + "i");
+        appendInfluxField(lineProtocol, firstField, "deepSleepRatio=" + String((int)sensorData.deep_sleep_ratio) + "i");
+    } else {
+        appendInfluxField(lineProtocol, firstField, "sleepQualityScore=" + String((int)sensorData.sleep_score) + "i");
+        appendInfluxField(lineProtocol, firstField, "sleepQualityGrade=" + String((int)sensorData.sleep_grade) + "i");
+        appendInfluxField(lineProtocol, firstField, "sleepState=" + String((int)sensorData.sleep_state) + "i");
+        appendInfluxField(lineProtocol, firstField, "totalSleepDuration=" + String((int)sensorData.sleep_total_time) + "i");
+        appendInfluxField(lineProtocol, firstField, "awakeDurationRatio=" + String((int)sensorData.awake_ratio) + "i");
+        appendInfluxField(lineProtocol, firstField, "lightSleepRatio=" + String((int)sensorData.light_sleep_ratio) + "i");
+        appendInfluxField(lineProtocol, firstField, "deepSleepRatio=" + String((int)sensorData.deep_sleep_ratio) + "i");
+        appendInfluxField(lineProtocol, firstField, "outOfBedDuration=" + String((int)sensorData.bed_Out_Time) + "i");
+        appendInfluxField(lineProtocol, firstField, "awakeDuration=" + String((int)sensorData.awake_time) + "i");
+        appendInfluxField(lineProtocol, firstField, "lightSleepDuration=" + String((int)sensorData.light_sleep_time) + "i");
+        appendInfluxField(lineProtocol, firstField, "deepSleepDuration=" + String((int)sensorData.deep_sleep_time) + "i");
+    }
+
+    appendInfluxField(lineProtocol, firstField, "outOfBedCount=" + String((int)sensorData.turn_count) + "i");
+    appendInfluxField(lineProtocol, firstField, "turnCount=" + String((int)sensorData.turnover_count) + "i");
+    appendInfluxField(lineProtocol, firstField, "avgBreathingRate=" + String((int)sensorData.avg_breath_rate) + "i");
+    appendInfluxField(lineProtocol, firstField, "avgHeartRate=" + String((int)sensorData.avg_heart_rate) + "i");
+    appendInfluxField(lineProtocol, firstField, "apneaCount=" + String((int)sensorData.apnea_count) + "i");
+    appendInfluxField(lineProtocol, firstField, "abnormalState=" + String((int)sensorData.abnormal_state) + "i");
+    appendInfluxField(lineProtocol, firstField, "breathStatus=" + String((int)sensorData.breath_status) + "i");
+    appendInfluxField(lineProtocol, firstField, "largeMoveRatio=" + String((int)sensorData.large_move_ratio) + "i");
+    appendInfluxField(lineProtocol, firstField, "smallMoveRatio=" + String((int)sensorData.small_move_ratio) + "i");
+    appendInfluxField(lineProtocol, firstField, "struggleAlert=" + String((int)sensorData.struggle_alert) + "i");
+    appendInfluxField(lineProtocol, firstField, "noOneAlert=" + String((int)sensorData.no_one_alert) + "i");
     
     Serial.println(String("🌙 发送睡眠数据到InfluxDB: ") + lineProtocol);
 
@@ -1292,7 +1364,7 @@ void sendSleepDataToInfluxDB() {
         if (httpResponseCode == 204) {
             Serial.println(String("✅ 睡眠数据已保存到InfluxDB设备") + getDeviceMacAddress() + "上");
             http.end();
-            return;
+            return true;
         }
         
         // 如果是连接错误，继续重试
@@ -1313,6 +1385,7 @@ void sendSleepDataToInfluxDB() {
         httpResponseCode == -1 ? "连接超时" : http.getString().c_str());
     
     http.end();
+    return false;
 }
 
 /**
@@ -2042,7 +2115,7 @@ bool processGetSavedNetworks(const BleProto::Frame& frame) {
     
     savedNetworksRequestCtx.seq = frame.seq;
     savedNetworksRequestCtx.active = true;
-    wifiManager.getSavedNetworks();
+    wifiManager.getSavedNetworks();// 同步获取已保存 WiFi 列表，结果通过 wifiSavedNetworksResultHandler 回包
     return true;
 }
 

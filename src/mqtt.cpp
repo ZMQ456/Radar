@@ -572,26 +572,25 @@ String makeMqttPassword(const String& clientId) {
  * 有结果且未过期（5秒内）才追加，否则静默跳过
  */
 static void appendEmotionFields(JsonDocument& doc) {
-    if (!g_hasEmotionResult || !g_lastEmotionResult.isValid) {
+    EmotionResult emotionResult = {};
+
+    if (!getFreshEmotionResult(emotionResult)) {
         return;
     }
-    // 超过 5 秒没更新，认为情绪结果过期
-    if (millis() - g_lastEmotionUpdateMs > 5000) {
-        return;
-    }
+
     // 主次情绪（枚举值，前端用 EMOTION_NAMES 映射）
-    doc["primaryEmotion"]    = static_cast<int>(g_lastEmotionResult.primaryEmotion);
-    doc["secondaryEmotion"]  = static_cast<int>(g_lastEmotionResult.secondaryEmotion);
+    doc["primaryEmotion"]    = static_cast<int>(emotionResult.primaryEmotion);
+    doc["secondaryEmotion"]  = static_cast<int>(emotionResult.secondaryEmotion);
     // 置信度和强度 0-1
-    doc["emotionConfidence"] = g_lastEmotionResult.confidence;
-    doc["emotionIntensity"]  = g_lastEmotionResult.intensity;
+    doc["emotionConfidence"] = emotionResult.confidence;
+    doc["emotionIntensity"]  = emotionResult.intensity;
     // 情绪维度：效价 -1~+1，唤醒度 0-1
-    doc["emotionValence"]    = g_lastEmotionResult.valence;
-    doc["emotionArousal"]    = g_lastEmotionResult.arousal;
+    doc["emotionValence"]    = emotionResult.valence;
+    doc["emotionArousal"]    = emotionResult.arousal;
     // 压力评估 0-100
-    doc["stressLevel"]       = g_lastEmotionResult.stressLevel;
-    doc["anxietyLevel"]      = g_lastEmotionResult.anxietyLevel;
-    doc["relaxationLevel"]   = g_lastEmotionResult.relaxationLevel;
+    doc["stressLevel"]       = emotionResult.stressLevel;
+    doc["anxietyLevel"]      = emotionResult.anxietyLevel;
+    doc["relaxationLevel"]   = emotionResult.relaxationLevel;
 }
 
 /**
@@ -977,32 +976,48 @@ void sendDailyDataToMQTT() {
  *
  * 触发条件： * - mqttTask中每10秒调用一次
  * - 仅在sleep_state为0(深睡)或1(浅睡)时上报 */
-void sendSleepDataToMQTT() {
+bool sendSleepDataToMQTT(bool allowSessionEnd) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[MQTT] WiFi未连接，跳过发送睡眠数据");
-        return;
+        return false;
     }
 
     checkMQTTStatus();
 
     if (!mqttClient.connected()) {
         Serial.println("[MQTT] MQTT未连接，跳过发送睡眠数据");
-        return;
+        return false;
     }
 
-    if (sensorData.sleep_state != 0 && sensorData.sleep_state != 1) {
-        Serial.printf("[MQTT] 当前不是睡眠状态，sleep_state=%d\n", sensorData.sleep_state);
-        return;
+    SleepAnalysisSnapshot sleepSnapshot = {0};
+    bool useAlgorithmSleepData = getFreshSleepAnalysisSnapshot(sleepSnapshot);
+
+    if (useAlgorithmSleepData
+            ? !(sleepSnapshot.algorithm_state == 3 ||
+                sleepSnapshot.algorithm_state == 4 ||
+                sleepSnapshot.algorithm_state == 5 ||
+                (allowSessionEnd && sleepSnapshot.algorithm_state == 8))
+            : (sensorData.sleep_state != 0 && sensorData.sleep_state != 1)) {
+        Serial.printf("[MQTT] 当前不是睡眠状态，state=%d (source=%s)\n",
+                      useAlgorithmSleepData ? sleepSnapshot.algorithm_state : (int)sensorData.sleep_state,
+                      useAlgorithmSleepData ? "algorithm" : "radar");
+        return false;
     }
 
     JsonDocument doc;
-    doc["sleepQualityScore"] = sensorData.sleep_score;
+    doc["sleepQualityScore"] = useAlgorithmSleepData
+        ? (int)(sleepSnapshot.total_score + 0.5f)
+        : sensorData.sleep_score;
     doc["sleepQualityGrade"] = sensorData.sleep_grade;
-    doc["totalSleepDuration"] = sensorData.sleep_total_time;
+    doc["totalSleepDuration"] = useAlgorithmSleepData
+        ? sleepSnapshot.total_sleep_time
+        : sensorData.sleep_total_time;
     doc["awakeDurationRatio"] = sensorData.awake_ratio;
     doc["lightSleepRatio"] = sensorData.light_sleep_ratio;
     doc["deepSleepRatio"] = sensorData.deep_sleep_ratio;
-    doc["outOfBedDuration"] = sensorData.bed_Out_Time;
+    doc["outOfBedDuration"] = useAlgorithmSleepData
+        ? sleepSnapshot.out_of_bed_time
+        : sensorData.bed_Out_Time;
     doc["outOfBedCount"] = sensorData.turn_count;
     doc["turnCount"] = sensorData.turnover_count;
     doc["avgBreathingRate"] = sensorData.avg_breath_rate;
@@ -1011,23 +1026,65 @@ void sendSleepDataToMQTT() {
     doc["abnormalState"] = sensorData.abnormal_state;
     doc["bodyMovement"] = sensorData.body_movement;
     doc["breathStatus"] = sensorData.breath_status;
-    doc["sleepState"] = sensorData.sleep_state;
+    doc["sleepState"] = useAlgorithmSleepData
+        ? sleepSnapshot.algorithm_state
+        : sensorData.sleep_state;
     doc["largeMoveRatio"] = sensorData.large_move_ratio;
     doc["smallMoveRatio"] = sensorData.small_move_ratio;
     doc["struggleAlert"] = sensorData.struggle_alert;
     doc["noOneAlert"] = sensorData.no_one_alert;
-    doc["awakeDuration"] = sensorData.awake_time;
-    doc["lightSleepDuration"] = sensorData.light_sleep_time;
-    doc["deepSleepDuration"] = sensorData.deep_sleep_time;
+    doc["awakeDuration"] = useAlgorithmSleepData
+        ? sleepSnapshot.awake_time
+        : sensorData.awake_time;
+    doc["lightSleepDuration"] = useAlgorithmSleepData
+        ? sleepSnapshot.light_sleep_time
+        : sensorData.light_sleep_time;
+    doc["deepSleepDuration"] = useAlgorithmSleepData
+        ? sleepSnapshot.deep_sleep_time
+        : sensorData.deep_sleep_time;
+
+    // 追加本地算法分析结果（SleepAnalyzer）
+    if (useAlgorithmSleepData) {
+        doc["algorithmState"] = sleepSnapshot.algorithm_state;// 算法状态：0-深睡，1-浅睡，2-未知
+        doc["algorithmSleepiness"] = sleepSnapshot.current_sleepiness;// 当前睡眠状态：0-深睡，1-浅睡，2-未知
+
+        // 算法统计数据
+        doc["algoTotalSleepTime"] = sleepSnapshot.total_sleep_time;
+        doc["algoDeepSleepTime"] = sleepSnapshot.deep_sleep_time;
+        doc["algoLightSleepTime"] = sleepSnapshot.light_sleep_time;
+        doc["algoRemSleepTime"] = sleepSnapshot.rem_sleep_time;
+        doc["algoAwakeTime"] = sleepSnapshot.awake_time;
+        doc["algoOutOfBedTime"] = sleepSnapshot.out_of_bed_time;
+        doc["algoSleepLatency"] = sleepSnapshot.sleep_latency;
+        doc["algoWakeCount"] = sleepSnapshot.wake_count;
+        doc["algoSleepCycles"] = sleepSnapshot.sleep_cycles;
+
+        // 算法评分
+        doc["algoDurationScore"] = sleepSnapshot.duration_score;
+        doc["algoDeepScore"] = sleepSnapshot.deep_score;
+        doc["algoContinuityScore"] = sleepSnapshot.continuity_score;
+        doc["algoPhysiologyScore"] = sleepSnapshot.physiology_score;
+        doc["algoLatencyScore"] = sleepSnapshot.latency_score;
+        doc["algoEfficiencyScore"] = sleepSnapshot.efficiency_score;
+        doc["algoCycleScore"] = sleepSnapshot.cycle_score;
+        doc["algoTotalScore"] = sleepSnapshot.total_score;
+
+        // 算法周期信息
+        doc["algoCycleCount"] = sleepSnapshot.cycle_count;
+        doc["algoInDeepPhase"] = sleepSnapshot.in_deep_phase;
+        doc["algoInRemPhase"] = sleepSnapshot.in_rem_phase;
+    }
 
     // 追加情绪字段（睡眠期间的情绪状态）
     appendEmotionFields(doc);
 
-    if (publishPropertyReport(doc, "sleep")) {
+    bool published = publishPropertyReport(doc, "sleep");
+    if (published) {
         Serial.println("[MQTT] 睡眠数据上报成功");
     } else {
         Serial.printf("[MQTT] 睡眠数据上报失败, state=%d\n", mqttClient.state());
     }
+    return published;
 }
 
 /**
@@ -1061,7 +1118,7 @@ void sendHeartbeatToMQTT() {
     doc["noOneAlert"] = sensorData.no_one_alert;
     doc["wifiIP"] = WiFi.localIP().toString();
 
-    // 追加情绪字段（无人时 g_hasEmotionResult 为 false，不会实际发出，保持接口一致）
+    // 追加情绪字段（有有效结果且未过期时才追加）
     appendEmotionFields(doc);
 
     if (publishPropertyReport(doc, "heartbeat")) {

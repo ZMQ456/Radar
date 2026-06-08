@@ -29,6 +29,8 @@
 #define QUEUE_SIZE 200 // 队列大小（增加到200以防止溢出）
 #define TASK_STACK_SIZE 8192 // 任务堆栈大小
 
+constexpr unsigned long SLEEP_ANALYSIS_SNAPSHOT_TTL_MS = 15000;
+
 #define FRAME_HEADER1 0x53  // 帧头字节1
 #define FRAME_HEADER2 0x59  // 帧头字节2
 #define FRAME_TAIL1   0x54  // 帧尾字节1
@@ -103,6 +105,46 @@ typedef struct { // 传感器数据结构体
     uint8_t apnea_count; // 呼吸暂停次数
 } SensorData; // 传感器数据结构体
 
+// SleepAnalyzer 算法输出快照（用于跨任务传递）
+typedef struct {
+    // 当前睡眠状态（算法定义）
+    int algorithm_state;      // 0-无人, 1-在床, 2-清醒, 3-浅睡, 4-深睡, 5-REM, 6-离床, 7-起床, 8-会话结束
+    float current_sleepiness; // 当前困倦度
+
+    // 睡眠统计
+    unsigned long total_sleep_time;     // 总睡眠时间
+    unsigned long deep_sleep_time;      // 深睡时间
+    unsigned long light_sleep_time;     // 浅睡时间
+    unsigned long rem_sleep_time;       // REM时间
+    unsigned long awake_time;           // 清醒时间
+    unsigned long out_of_bed_time;      // 离床时间
+    unsigned long sleep_latency;        // 入睡潜伏期
+    int wake_count;                     // 醒来次数
+    int sleep_cycles;                   // 睡眠周期数
+    unsigned long session_start_time;   // 会话开始时间
+    unsigned long sleep_start_time;     // 入睡时间
+    unsigned long last_wake_time;       // 最后醒来时间
+
+    // 睡眠评分
+    float duration_score;      // 时长评分
+    float deep_score;          // 深睡评分
+    float continuity_score;    // 连续性评分
+    float physiology_score;    // 生理指标评分
+    float latency_score;       // 入睡潜伏期评分
+    float efficiency_score;    // 睡眠效率评分
+    float cycle_score;         // 周期评分
+    float total_score;         // 总分
+
+    // 睡眠周期
+    int cycle_count;              // 当前周期数
+    unsigned long cycle_start_time; // 当前周期开始时间
+    bool in_deep_phase;          // 是否在深睡阶段
+    bool in_rem_phase;           // 是否在REM阶段
+
+    unsigned long updated_at; // 更新时间
+    bool valid; // 数据有效性标志
+} SleepAnalysisSnapshot;
+
 typedef struct { // 相位数据结构体
     int heartbeat_waveform; // 心跳波形
     int breathing_waveform; // 呼吸波形
@@ -169,6 +211,10 @@ public:
 };
 
 extern SensorData sensorData; // 传感器数据
+void updateSleepAnalysisSnapshot(const SleepAnalysisSnapshot& snapshot);
+bool getFreshSleepAnalysisSnapshot(SleepAnalysisSnapshot& snapshot);
+bool isSleepAnalysisSnapshotFresh();
+void invalidateSleepAnalysisSnapshotIfStale();
 extern HardwareSerial mySerial1; // 硬件串口1
 extern QueueHandle_t phaseDataQueue; // 相位数据队列
 extern QueueHandle_t vitalDataQueue; // 生命体征数据队列
@@ -322,7 +368,7 @@ void sendWiFiScanResultToBLE(uint8_t resultCode,
 void sendSavedNetworksResultToBLE(bool success, const std::vector<WiFiScanResult>& networks = {});
 
 bool sendDailyDataToInfluxDB(String dailyDataLine);// 发送每日数据到InfluxDB，参数是符合InfluxDB Line Protocol格式的字符串
-void sendSleepDataToInfluxDB();// 发送睡眠数据到InfluxDB，函数内部会构建符合InfluxDB Line Protocol格式的数据字符串并发送
+bool sendSleepDataToInfluxDB(bool allowSessionEnd = false);// 发送睡眠数据到InfluxDB，函数内部会构建符合InfluxDB Line Protocol格式的数据字符串并发送
 
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override;
