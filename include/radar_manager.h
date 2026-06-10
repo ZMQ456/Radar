@@ -211,6 +211,7 @@ public:
 };
 
 extern SensorData sensorData; // 传感器数据
+extern SleepAnalysisSnapshot sleepAnalysisSnapshot; // 睡眠分析快照（全局缓存）
 void updateSleepAnalysisSnapshot(const SleepAnalysisSnapshot& snapshot);
 bool getFreshSleepAnalysisSnapshot(SleepAnalysisSnapshot& snapshot);
 bool isSleepAnalysisSnapshotFresh();

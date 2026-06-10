@@ -46,7 +46,7 @@ static uint8_t currentMqttStatus = 0;          // MQTT 状态
 static uint8_t currentRadarSleepStatus = 0;    // 雷达睡眠查询状态
 
 SensorData sensorData; // 传感器数据结构体
-static SleepAnalysisSnapshot sleepAnalysisSnapshot = {0}; // 睡眠分析快照（全局缓存）
+SleepAnalysisSnapshot sleepAnalysisSnapshot = {0}; // 睡眠分析快照（全局缓存）
 static portMUX_TYPE sleepAnalysisSnapshotMux = portMUX_INITIALIZER_UNLOCKED;
 HardwareSerial mySerial1(1); // 硬件串口1对象
 
@@ -109,7 +109,7 @@ QueueHandle_t bleCommandQueue = nullptr; // BLE命令队列
 
 bool continuousSendEnabled = false; // 持续发送使能标志
 unsigned long continuousSendInterval = 500; // 持续发送间隔（毫秒）
-bool radarSleepQueryEnabled = false; // 雷达睡眠/综合状态查询开关（0x8D/0x90）
+bool radarSleepQueryEnabled = true; // 雷达睡眠/综合状态查询开关（0x8D/0x90）（默认开启）
 BLEFlowController bleFlow(500); // BLE流控制器对象
 SemaphoreHandle_t bleSendMutex; // BLE发送互斥锁
 
@@ -1299,13 +1299,13 @@ bool sendSleepDataToInfluxDB(bool allowSessionEnd) {
         appendInfluxField(lineProtocol, firstField, "sleepQualityScore=" + String((int)(sleepSnapshot.total_score + 0.5f)) + "i");
         appendInfluxField(lineProtocol, firstField, "sleepQualityGrade=" + String((int)sensorData.sleep_grade) + "i");
         appendInfluxField(lineProtocol, firstField, "sleepState=" + String(sleepSnapshot.algorithm_state) + "i");
-        appendInfluxField(lineProtocol, firstField, "totalSleepDuration=" + String(sleepSnapshot.total_sleep_time) + "i");
-        appendInfluxField(lineProtocol, firstField, "awakeDuration=" + String(sleepSnapshot.awake_time) + "i");
-        appendInfluxField(lineProtocol, firstField, "lightSleepDuration=" + String(sleepSnapshot.light_sleep_time) + "i");
-        appendInfluxField(lineProtocol, firstField, "deepSleepDuration=" + String(sleepSnapshot.deep_sleep_time) + "i");
-        appendInfluxField(lineProtocol, firstField, "remSleepDuration=" + String(sleepSnapshot.rem_sleep_time) + "i");
-        appendInfluxField(lineProtocol, firstField, "outOfBedDuration=" + String(sleepSnapshot.out_of_bed_time) + "i");
-        appendInfluxField(lineProtocol, firstField, "sleepLatency=" + String(sleepSnapshot.sleep_latency) + "i");
+        appendInfluxField(lineProtocol, firstField, "totalSleepDuration=" + String(sleepSnapshot.total_sleep_time / 60000UL) + "i");
+        appendInfluxField(lineProtocol, firstField, "awakeDuration=" + String(sleepSnapshot.awake_time / 60000UL) + "i");
+        appendInfluxField(lineProtocol, firstField, "lightSleepDuration=" + String(sleepSnapshot.light_sleep_time / 60000UL) + "i");
+        appendInfluxField(lineProtocol, firstField, "deepSleepDuration=" + String(sleepSnapshot.deep_sleep_time / 60000UL) + "i");
+        appendInfluxField(lineProtocol, firstField, "remSleepDuration=" + String(sleepSnapshot.rem_sleep_time / 60000UL) + "i");
+        appendInfluxField(lineProtocol, firstField, "outOfBedDuration=" + String(sleepSnapshot.out_of_bed_time / 60000UL) + "i");
+        appendInfluxField(lineProtocol, firstField, "sleepLatency=" + String(sleepSnapshot.sleep_latency / 60000UL) + "i");
         appendInfluxField(lineProtocol, firstField, "wakeCount=" + String(sleepSnapshot.wake_count) + "i");
         appendInfluxField(lineProtocol, firstField, "sleepCycles=" + String(sleepSnapshot.sleep_cycles) + "i");
         appendInfluxField(lineProtocol, firstField, "sleepiness=" + String(sleepSnapshot.current_sleepiness));

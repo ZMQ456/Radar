@@ -28,10 +28,10 @@
 #define CURRENT_PROTOCOL       PROTOCOL_JSON
 
 // JSON数据字段名 (根据您的雷达协议修改)
-#define JSON_FIELD_HEART_RATE  "heart_rate"
-#define JSON_FIELD_RESPIRATION "respiration_rate"
-#define JSON_FIELD_HR_QUALITY  "hr_quality"
-#define JSON_FIELD_RR_QUALITY  "rr_quality"
+#define JSON_FIELD_HEART_RATE  "heart_rate"//心率
+#define JSON_FIELD_RESPIRATION "respiration_rate"//呼吸频率
+#define JSON_FIELD_HR_QUALITY  "hr_quality"//心率质量
+#define JSON_FIELD_RR_QUALITY  "rr_quality"//呼吸频率质量
 
 // 文本格式示例: "HR:72,RR:16\n"
 #define TEXT_HR_PREFIX         "HR:"

@@ -72,4 +72,9 @@ void radarCmdTask(void *parameter);
 void emotionAnalysisTask(void *parameter);
 void sleepAnalysisTask(void *parameter);
 
+// 情绪分析结果（供 MQTT 上报读取）
+extern EmotionResult g_lastEmotionResult;
+extern bool g_hasEmotionResult;
+extern unsigned long g_lastEmotionUpdateMs;
+
 #endif

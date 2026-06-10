@@ -125,6 +125,11 @@ private:
 
     float lastRRValue;
 
+    // 深睡期生理质量累计（用于睡眠评分）
+    float deepHrvSum;         // 深睡期 RMSSD 累计
+    float deepRrRegSum;       // 深睡期呼吸规律性累计
+    int   deepPhysioSamples;  // 深睡期样本数
+
     // HR 觉醒检测（从 Python 移植：追踪睡眠期 HR 基线，检测持续升高）
     float sleepHRBaseline;
     int sleepHRBaselineCount;

@@ -66,6 +66,11 @@ void SleepAnalyzer::reset() {
     lastRRValue = 0;
     wasAsleep = false;
 
+    // 深睡期生理质量累计
+    deepHrvSum = 0;
+    deepRrRegSum = 0;
+    deepPhysioSamples = 0;
+
     // HR 觉醒检测
     sleepHRBaseline = 0;
     sleepHRBaselineCount = 0;
@@ -944,59 +949,69 @@ void SleepAnalyzer::calculateSleepScore() {
     float totalHours = stats.totalSleepTime / 3600000.0f;
     if (totalHours >= 7.0f && totalHours <= 9.0f) {
         score.durationScore = 18.0f;
-    } else if (totalHours >= 6.0f && totalHours < 7.0f) {
+    } else if ((totalHours >= 6.0f && totalHours < 7.0f) ||
+               (totalHours > 9.0f && totalHours <= 10.0f)) {
         score.durationScore = 13.0f;
-    } else if (totalHours > 9.0f && totalHours <= 10.0f) {
-        score.durationScore = 13.0f;
+    } else if ((totalHours >= 5.0f && totalHours < 6.0f) ||
+               (totalHours > 10.0f && totalHours <= 11.0f)) {
+        score.durationScore = 7.0f;
     } else {
-        score.durationScore = 5.0f;
+        score.durationScore = 3.0f;
     }
 
     float deepRatio = (stats.totalSleepTime > 0) ?
         (float)stats.deepSleepTime / stats.totalSleepTime : 0;
     if (deepRatio > 0.2f) {
-        score.deepScore = 14.0f;
+        score.deepScore = 15.0f;
     } else if (deepRatio > 0.15f) {
-        score.deepScore = 11.0f;
+        score.deepScore = 12.0f;
     } else if (deepRatio > 0.1f) {
-        score.deepScore = 7.0f;
+        score.deepScore = 8.0f;
     } else {
-        score.deepScore = 3.0f;
+        score.deepScore = 4.0f;
     }
 
     if (stats.wakeCount <= 1) {
-        score.continuityScore = 11.0f;
+        score.continuityScore = 12.0f;
     } else if (stats.wakeCount <= 3) {
-        score.continuityScore = 7.0f;
+        score.continuityScore = 9.0f;
     } else if (stats.wakeCount <= 5) {
-        score.continuityScore = 4.0f;
+        score.continuityScore = 5.0f;
     } else {
         score.continuityScore = 2.0f;
     }
 
-    score.physiologyScore = 7.0f;
-
-    float latencyMin = stats.sleepLatency / 60.0f;
-    if (latencyMin < 20.0f) {
-        score.latencyScore = 8.0f;
-    } else if (latencyMin < 30.0f) {
-        score.latencyScore = 6.0f;
-    } else if (latencyMin < 45.0f) {
-        score.latencyScore = 3.0f;
+    // 生理质量评分：深睡期 HRV(RMSSD) + 呼吸规律性
+    if (deepPhysioSamples > 0) {
+        float avgHrv = deepHrvSum / deepPhysioSamples;
+        float avgRrReg = deepRrRegSum / deepPhysioSamples;
+        float hrvScore = 0, rrRegScore = 0;
+        if (avgHrv > 30.0f)      hrvScore = 8.0f;
+        else if (avgHrv > 20.0f) hrvScore = 6.0f;
+        else if (avgHrv > 10.0f) hrvScore = 4.0f;
+        else                     hrvScore = 3.0f;
+        if (avgRrReg > 0.8f)      rrRegScore = 7.0f;
+        else if (avgRrReg > 0.6f) rrRegScore = 5.0f;
+        else if (avgRrReg > 0.4f) rrRegScore = 4.0f;
+        else                      rrRegScore = 3.0f;
+        score.physiologyScore = hrvScore + rrRegScore;
     } else {
-        score.latencyScore = 1.0f;
+        score.physiologyScore = 6.0f;  // 无深睡时给最低保底
     }
+
+    // 移除入睡速度评分（不再使用 latencyScore）
+    score.latencyScore = 0;
 
     float sleepEfficiency = 0;
     if (stats.totalSleepTime + stats.awakeTime > 0) {
         sleepEfficiency = (float)stats.totalSleepTime / (stats.totalSleepTime + stats.awakeTime);
     }
-    if (sleepEfficiency > 0.9f) {
-        score.efficiencyScore = 14.0f;
-    } else if (sleepEfficiency > 0.8f) {
-        score.efficiencyScore = 10.0f;
-    } else if (sleepEfficiency > 0.7f) {
-        score.efficiencyScore = 6.0f;
+    if (sleepEfficiency > 0.95f) {
+        score.efficiencyScore = 15.0f;
+    } else if (sleepEfficiency > 0.85f) {
+        score.efficiencyScore = 11.0f;
+    } else if (sleepEfficiency > 0.75f) {
+        score.efficiencyScore = 7.0f;
     } else {
         score.efficiencyScore = 3.0f;
     }
@@ -1005,39 +1020,35 @@ void SleepAnalyzer::calculateSleepScore() {
         (float)stats.remSleepTime / stats.totalSleepTime : 0;
     float cycleScoreVal = 0;
     if (stats.sleepCycles >= 4) {
-        cycleScoreVal = 20.0f;
+        cycleScoreVal = 18.0f;
     } else if (stats.sleepCycles >= 3) {
-        cycleScoreVal = 15.0f;
+        cycleScoreVal = 13.0f;
     } else if (stats.sleepCycles >= 2) {
-        cycleScoreVal = 10.0f;
+        cycleScoreVal = 9.0f;
     } else if (stats.sleepCycles >= 1) {
-        cycleScoreVal = 6.0f;
+        cycleScoreVal = 5.0f;
     } else {
         cycleScoreVal = 2.0f;
     }
     if (remRatio >= 0.2f && remRatio <= 0.25f) {
-        cycleScoreVal += 8.0f;
+        cycleScoreVal += 7.0f;
     } else if (remRatio >= 0.15f) {
         cycleScoreVal += 5.0f;
-    } else if (remRatio > 0) {
-        cycleScoreVal += 2.0f;
     }
-    score.cycleScore = constrain_value(cycleScoreVal, 0.0f, 28.0f);
+    score.cycleScore = constrain_value(cycleScoreVal, 0.0f, 25.0f);
 
     float rawTotal = score.durationScore + score.deepScore +
                      score.continuityScore + score.physiologyScore +
-                     score.latencyScore + score.efficiencyScore +
-                     score.cycleScore;
-    score.totalScore = constrain_value(rawTotal / 100.0f * 100.0f, 0.0f, 100.0f);
+                     score.efficiencyScore + score.cycleScore;
+    score.totalScore = constrain_value(rawTotal, 0.0f, 100.0f);
 
     Serial.println("━━━━━━━━━━ 睡眠评分 ━━━━━━━━━━");
     Serial.printf("  时长评分: %.0f/18\n", score.durationScore);
-    Serial.printf("  深睡评分: %.0f/14\n", score.deepScore);
-    Serial.printf("  连续性评分: %.0f/11\n", score.continuityScore);
-    Serial.printf("  生理质量评分: %.0f/7\n", score.physiologyScore);
-    Serial.printf("  入睡速度评分: %.0f/8\n", score.latencyScore);
-    Serial.printf("  睡眠效率评分: %.0f/14 (效率:%.0f%%)\n", score.efficiencyScore, sleepEfficiency * 100);
-    Serial.printf("  周期评分: %.0f/28 (周期数:%d, REM占比:%.0f%%)\n",
+    Serial.printf("  深睡评分: %.0f/15\n", score.deepScore);
+    Serial.printf("  连续性评分: %.0f/12\n", score.continuityScore);
+    Serial.printf("  生理质量评分: %.0f/15\n", score.physiologyScore);
+    Serial.printf("  睡眠效率评分: %.0f/15 (效率:%.0f%%)\n", score.efficiencyScore, sleepEfficiency * 100);
+    Serial.printf("  周期评分: %.0f/25 (周期数:%d, REM占比:%.0f%%)\n",
                   score.cycleScore, stats.sleepCycles, remRatio * 100);
     Serial.printf("  总分: %.0f/100\n", score.totalScore);
     Serial.println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -1062,6 +1073,20 @@ void SleepAnalyzer::update(const HeartRateData& hrData,
     updateSleepCycle();
 
     updateStatistics(1000);
+
+    // 深睡期生理数据累计（用于睡眠评分）
+    if (currentState == SLEEP_DEEP_SLEEP) {
+        if (hrvData.isValid) {
+            deepHrvSum += hrvData.rmssd;
+        }
+        if (rrData.isValid) {
+            // 呼吸规律性：偏离基线越少越规律
+            float rrDev = fabs(rrData.rateSmoothed - baselineRR) / 5.0f;
+            float rrReg = 1.0f - constrain_value(rrDev, 0.0f, 1.0f);
+            deepRrRegSum += rrReg;
+        }
+        deepPhysioSamples++;
+    }
 }
 
 void SleepAnalyzer::printState() {

@@ -21,9 +21,9 @@ uint64_t device_sn = 0;//设备SN，初始为0，后续从Flash中加载
 SimpleEmotionAnalyzer* emotionAnalyzer;//情感分析器
 
 // 情绪分析结果缓存（供 MQTT 上报读取）
-static EmotionResult g_lastEmotionResult = {};
-static bool g_hasEmotionResult = false;
-static unsigned long g_lastEmotionUpdateMs = 0;
+EmotionResult g_lastEmotionResult = {};
+bool g_hasEmotionResult = false;
+unsigned long g_lastEmotionUpdateMs = 0;
 static portMUX_TYPE emotionResultMux = portMUX_INITIALIZER_UNLOCKED;
 static const unsigned long EMOTION_RESULT_TTL_MS = 5000;
 
@@ -354,6 +354,12 @@ void sleepAnalysisTask(void *parameter) {
         if (currentTime - lastSleepAnalysisTime >= SLEEP_ANALYSIS_INTERVAL) {
             lastSleepAnalysisTime = currentTime;
 
+            // 检查雷达睡眠模式是否启用
+            if (!radarSleepQueryEnabled) {
+                Serial.println("[SleepAnalyzer] 雷达睡眠模式已禁用，跳过算法分析");
+                continue;
+            }
+
             if (sensorData.heart_valid || sensorData.breath_valid) {
                 float hr = sensorData.heart_valid ? sensorData.heart_rate : 0;
                 float rr = sensorData.breath_valid ? sensorData.breath_rate : 0;
@@ -363,12 +369,12 @@ void sleepAnalysisTask(void *parameter) {
                         sensorData.heart_valid ? 80 : 0,
                         sensorData.breath_valid ? 80 : 0);
 
-                    HeartRateData hrData = sleepPhysioProcessor->getHeartRateData();
-                    RespirationData rrData = sleepPhysioProcessor->getRespirationData();
-                    HRVEstimate hrvData = sleepPhysioProcessor->getHRVEstimate();
+                    HeartRateData hrData = sleepPhysioProcessor->getHeartRateData();//获取心率数据
+                    RespirationData rrData = sleepPhysioProcessor->getRespirationData();//获取呼吸数据
+                    HRVEstimate hrvData = sleepPhysioProcessor->getHRVEstimate();//获取HRV数据
 
                     BodyMovementData movementData;
-                    memset(&movementData, 0, sizeof(BodyMovementData));
+                    memset(&movementData, 0, sizeof(BodyMovementData));//初始化运动数据结构体
                     movementData.movement = sensorData.body_movement;
                     movementData.movementSmoothed = sensorData.body_movement;
                     movementData.movementMean = sensorData.body_movement;
@@ -380,45 +386,45 @@ void sleepAnalysisTask(void *parameter) {
                                           sensorData.bed_status);
 
                     // 更新全局睡眠分析快照
-                    SleepState state = sleepAnalyzer->getCurrentState();
-                    SleepStatistics stats = sleepAnalyzer->getStatistics();
-                    SleepScore score = sleepAnalyzer->getScore();
-                    SleepCycle cycle = sleepAnalyzer->getCycle();
+                    SleepState state = sleepAnalyzer->getCurrentState();//获取当前睡眠状态
+                    SleepStatistics stats = sleepAnalyzer->getStatistics();//获取睡眠统计信息
+                    SleepScore score = sleepAnalyzer->getScore();//获取睡眠评分
+                    SleepCycle cycle = sleepAnalyzer->getCycle();//获取睡眠周期信息
                     SleepAnalysisSnapshot snapshot = {0};
 
                     snapshot.algorithm_state = (int)state;
-                    snapshot.current_sleepiness = sleepAnalyzer->getSleepiness();
+                    snapshot.current_sleepiness = sleepAnalyzer->getSleepiness();//获取当前睡眠iness
 
-                    snapshot.total_sleep_time = stats.totalSleepTime;
-                    snapshot.deep_sleep_time = stats.deepSleepTime;
-                    snapshot.light_sleep_time = stats.lightSleepTime;
-                    snapshot.rem_sleep_time = stats.remSleepTime;
-                    snapshot.awake_time = stats.awakeTime;
-                    snapshot.out_of_bed_time = stats.outOfBedTime;
-                    snapshot.sleep_latency = stats.sleepLatency;
-                    snapshot.wake_count = stats.wakeCount;
-                    snapshot.sleep_cycles = stats.sleepCycles;
-                    snapshot.session_start_time = stats.sessionStartTime;
-                    snapshot.sleep_start_time = stats.sleepStartTime;
-                    snapshot.last_wake_time = stats.lastWakeTime;
+                    snapshot.total_sleep_time = stats.totalSleepTime;//获取总睡眠时间
+                    snapshot.deep_sleep_time = stats.deepSleepTime;//获取深度睡眠时间
+                    snapshot.light_sleep_time = stats.lightSleepTime;//获取浅睡眠时间
+                    snapshot.rem_sleep_time = stats.remSleepTime;//获取REM睡眠时间
+                    snapshot.awake_time = stats.awakeTime;//获取清醒时间
+                    snapshot.out_of_bed_time = stats.outOfBedTime;//获取离床时间
+                    snapshot.sleep_latency = stats.sleepLatency;//获取睡眠延迟
+                    snapshot.wake_count = stats.wakeCount;//获取唤醒次数
+                    snapshot.sleep_cycles = stats.sleepCycles;//获取睡眠周期数
+                    snapshot.session_start_time = stats.sessionStartTime;//获取会话开始时间
+                    snapshot.sleep_start_time = stats.sleepStartTime;//获取睡眠开始时间
+                    snapshot.last_wake_time = stats.lastWakeTime;//获取上次唤醒时间
 
-                    snapshot.duration_score = score.durationScore;
-                    snapshot.deep_score = score.deepScore;
-                    snapshot.continuity_score = score.continuityScore;
-                    snapshot.physiology_score = score.physiologyScore;
-                    snapshot.latency_score = score.latencyScore;
-                    snapshot.efficiency_score = score.efficiencyScore;
-                    snapshot.cycle_score = score.cycleScore;
-                    snapshot.total_score = score.totalScore;
+                    snapshot.duration_score = score.durationScore;//获取睡眠持续时间评分
+                    snapshot.deep_score = score.deepScore;//获取深度睡眠评分
+                    snapshot.continuity_score = score.continuityScore;//获取睡眠连续性评分
+                    snapshot.physiology_score = score.physiologyScore;//获取生理评分
+                    snapshot.latency_score = score.latencyScore;//获取睡眠延迟评分
+                    snapshot.efficiency_score = score.efficiencyScore;//获取睡眠效率评分
+                    snapshot.cycle_score = score.cycleScore;//获取睡眠周期评分
+                    snapshot.total_score = score.totalScore;//获取总睡眠评分
 
-                    snapshot.cycle_count = cycle.cycleCount;
-                    snapshot.cycle_start_time = cycle.cycleStartTime;
-                    snapshot.in_deep_phase = cycle.inDeepPhase;
-                    snapshot.in_rem_phase = cycle.inRemPhase;
+                    snapshot.cycle_count = cycle.cycleCount;//获取睡眠周期数
+                    snapshot.cycle_start_time = cycle.cycleStartTime;//获取睡眠周期开始时间
+                    snapshot.in_deep_phase = cycle.inDeepPhase;//是否在深度睡眠阶段
+                    snapshot.in_rem_phase = cycle.inRemPhase;//是否在REM睡眠阶段
 
-                    snapshot.updated_at = currentTime;
-                    snapshot.valid = true;
-                    updateSleepAnalysisSnapshot(snapshot);
+                    snapshot.updated_at = currentTime;//更新时间
+                    snapshot.valid = true;//设置为有效
+                    updateSleepAnalysisSnapshot(snapshot);//更新睡眠分析快照
 
                     // 会话结束检测：监听 SLEEP_SESSION_END 状态，立即发送睡眠报告
                     if (state == SLEEP_SESSION_END) {

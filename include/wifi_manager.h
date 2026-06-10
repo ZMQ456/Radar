@@ -45,6 +45,17 @@ struct WiFiScanResult {
  */
 #define WIFI_RECONNECT_INTERVAL 3000
 
+/*****************************************测试用******************************* */
+/**
+ * @brief 默认WiFi名称
+ */
+#define DEFAULT_WIFI_SSID "Xiaomi_495B"
+/**
+ * @brief 默认WiFi密码
+ */
+#define DEFAULT_WIFI_PASSWORD "20221109"
+/*****************************************测试用******************************* */
+
 /**
  * @brief WiFi网络信息结构
  * 存储WiFi网络的详细信息，用于扫描和显示

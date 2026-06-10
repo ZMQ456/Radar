@@ -75,7 +75,19 @@ WiFiManager::WiFiManager() {
 void WiFiManager::begin() {
     preferences.begin("wifi_manager", false);
     loadWiFiConfigs();
-    
+
+
+/***************************************测试用*******************************************/
+    // 强制写入默认 WiFi 凭据到 Flash（每次上电都执行）
+    // 已有同名 SSID 时只会更新密码，不会重复占用槽位
+    saveWiFiConfig(DEFAULT_WIFI_SSID, DEFAULT_WIFI_PASSWORD);
+    Serial.printf("📌 [WiFi] 已写入默认凭据: %s\n", DEFAULT_WIFI_SSID);
+    loadWiFiConfigs();
+/***************************************测试用*******************************************/
+
+
+
+
     // 注册WiFi事件监听器
     WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
         switch (event) {
@@ -638,21 +650,21 @@ void WiFiManager::scanAndSendResults() {
  * @return 是否配置成功
  */
 bool WiFiManager::handleConfigurationData(const char* ssid, const char* password) {
-    // 尝试获取WiFi互斥锁，最多等待100ms
-    if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-        Serial.println("⏸️ [handleConfigurationData] WiFi正在被其他操作占用，跳过配网");
+    // ⚠️ 关键修改：在获取锁之前就设置标志位，让重连任务立即暂停
+    manualConfigActive = true;
+    Serial.println("🔧 [WiFi] 手动配置模式已激活，立即停止所有 WiFi 操作");
+    
+    // 尝试获取 WiFi 互斥锁，增加等待时间到 5 秒
+    if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("⏸️ [handleConfigurationData] WiFi 正在被其他操作占用，跳过配网");
+        manualConfigActive = false;  // 重置标志位
         if (deviceConnected) {
             sendWiFiConfigResultToBLE(BleProto::ErrorCode::ERR_WIFI_BUSY);
         }
         return false;
     }
     
-    // 立即设置手动配置标志位，暂停所有WiFi操作
-    manualConfigActive = true;
-    
-    Serial.println("🔧 [WiFi] 手动配置模式已激活，立即停止所有WiFi操作");
-    
-    // 立即断开当前WiFi连接
+    // 立即断开当前 WiFi 连接
     WiFi.disconnect(true);
     
     // 如果正在扫描，立即停止扫描
@@ -924,9 +936,14 @@ void WiFiManager::handleReconnect() {
             while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < 8000) {
                 vTaskDelay(100 / portTICK_PERIOD_MS);
                 
-                // 检查是否被中断
+                // 检查是否被中断（蓝牙配网或扫描）
                 if (manualConfigActive) {
                     Serial.println("🔧 [handleReconnect] 被蓝牙配网中断");
+                    xSemaphoreGive(wifiMutex);
+                    return;
+                }
+                if (scanInProgress) {
+                    Serial.println("🔍 [handleReconnect] 被 WiFi 扫描中断");
                     xSemaphoreGive(wifiMutex);
                     return;
                 }
@@ -1208,25 +1225,39 @@ void WiFiManager::reconnectTask(void* parameter) {
                  manager->currentState, manager->manualConfigActive);
     
     while (true) {
-        // 检查是否正在扫描或手动配置中
+        // ⚠️ 方案 C：在循环开头检查 BLE 配网标志位
+        // 如果 BLE 正在配网，立即跳过本次重连尝试
+        if (manager->manualConfigActive) {
+            Serial.println("🔵 [重连任务] 检测到 BLE 配网，暂停重连");
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            continue;
+        }
+        
+        // ⚠️ 检查是否正在扫描
+        if (manager->scanInProgress) {
+            Serial.println("🔍 [重连任务] 检测到 WiFi 扫描，暂停重连");
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            continue;
+        }
+        
+        // 检查是否正在扫描或手动配置中（双重保险）
         if (manager->scanInProgress || manager->manualConfigActive) {
             vTaskDelay(500 / portTICK_PERIOD_MS);
             continue;
         }
         
         // 执行正常重连逻辑
-        if (manager->currentState == WIFI_DISCONNECTED && 
-            !manager->manualConfigActive) {
+        if (manager->currentState == WIFI_DISCONNECTED) {
             
             unsigned long currentTime = millis();
             unsigned long timeSinceLastAttempt = currentTime - manager->lastReconnectAttempt;
             
-            // 断开后立即尝试重连（前3次），之后按间隔重连
+            // 断开后立即尝试重连（前 3 次），之后按间隔重连
             static int quickRetryCount = 0;
             bool shouldRetry = false;
             
             if (quickRetryCount < 3) {
-                // 前3次快速重连（每次1秒间隔）
+                // 前 3 次快速重连（每次 1 秒间隔）
                 shouldRetry = (timeSinceLastAttempt >= 1000);
                 if (shouldRetry) {
                     quickRetryCount++;
@@ -1284,9 +1315,16 @@ bool WiFiManager::startScan(uint32_t timeoutMs) {
     
     Serial.println("🔔 [startScan] 设置扫描标志...");
     
-    // 设置扫描标志（重连任务会检测这个标志）
+    // ⚠️ 关键修改：在获取锁之前就设置标志位，让重连任务立即暂停
     scanInProgress = true;
     Serial.println("✅ [startScan] scanInProgress 已设置为 true");
+    
+    // 获取 WiFi 互斥锁，增加等待时间到 5 秒
+    if (xSemaphoreTake(wifiMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("⏸️ [startScan] WiFi 正在被其他操作占用，扫描失败");
+        scanInProgress = false;  // 重置标志位
+        return false;
+    }
     
     // 获取状态锁，修改状态
     if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1299,6 +1337,9 @@ bool WiFiManager::startScan(uint32_t timeoutMs) {
     
     // 执行实际扫描
     scanAndSendResults();
+    
+    // 扫描完成，释放锁
+    xSemaphoreGive(wifiMutex);
     
     // 扫描完成，清除标志，恢复重连任务
     scanInProgress = false;
